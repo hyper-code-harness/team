@@ -1,0 +1,145 @@
+# Team: persistent roster, hiring and reviewed work
+
+Open `/team/`. Owner bootstrap: create dedicated persistent agent sessions with the standard New Agent UI, then enter their IDs, roles and responsibilities in the team creation form. Do not reuse personal chats; communications are public within the team. Only same-owner, nonhidden, nonarchived sessions are accepted. An agent can belong to only one active team. Assign separate workspaces for concurrent file editing; this is not a sandbox.
+
+Create produces a draft. Activation freezes roster, goal and supervisor and queues the complete passport. The HTTP activation flow configures an owner-scoped cron grant first. The page also has a Configure / repair maintenance button. **A grant is not proof that the cron worker has completed its handoff.** See WORKLOG.md for the current operational gate.
+
+Agent workflow: call `team.sync({teamId})`, inspect `team.tasks` and paginated `team.timeline({teamId,afterSeq,limit})`. Task state changes require `requestKey` and `expectedVersion`: task version for assign/transition, team version for other commands. Reuse a key only for an exact retry; new intent uses a new key. Rejected commands do not reserve a key. `team.executeCommand` is the atomic boundary; convenience functions are create, activate, archive, hire, fire, taskCreate, taskAssign, taskReorder, claim, preempt, taskTransition, say and report.
+
+Fixed assignee after first start. One working/blocked slot per member (paused does not hold it). Explicit actions are start/block/pause/resume/claim/submit/approve/changes/cancel; no arbitrary patch. Submit contains summary, artifact references and verification. It records immutable event evidence, releases the slot and enters review. A supervisor cannot approve their own task: owner review is required. Started work cannot be reassigned; it can be cancelled only from paused, by supervisor/owner with a reason; archive requires terminal tasks and resolved deliveries.
+
+`say` is public to the whole team; `to` selects notification recipients, not visibility. Ordinary `report` does not wake anyone. Progress reports record timestamps but cannot indefinitely extend the current hard deadline. One escalation is emitted per generation. Deadline and failure events preserve system source in the public timeline; transport envelope is explicitly automated, never a direct owner command.
+
+## Team rules brief (injected into every delegated task by team.delegate; read by team.brief)
+
+<!-- brief -->
+Team rules — follow them in this task:
+1. Took a task → size it: `team.estimate({ taskId, size, steps? })` with size `S` (up to ~15 min), `M` (up to an hour) or `L` (more), for each of your plan task ids, right away. No minutes.
+2. Every noticeable step → `team.progress({ taskId, stage })`: the stage in a few words, no percent. Not per tool call.
+3. Before you start, before you edit a shared file and at every new step → `team.feed({})`: you get only what is new since your last read (first time: `after` = the feed cursor below). Who works on what, so you do not redo or clash. Whole feed: `team.feed({ all: true })`.
+4. `team.post({ text, taskId, kind })` (≤280 chars, one fact): heads-up = found a gotcha / changed a shared file (name it); question = stuck; done = big step that unblocks others. No spam.
+5. Task text: the part before `---` is for a person, after it — details for you.
+6. Your `summary` (finishTask, report) is two layers too: 1–3 plain sentences for a person, what changed for them; then a line `---`, then technical detail.
+7. Report (`types.team.TaskReport`) fields: `checks` (what you verified and how, as it is, failures too), `notDone` (what of the task is left; always present, [] if all done), `next` ([{ title, why?, kind: 'continue'|'new' }]; always present, [] if nothing; continue = finish this task, new = separate task), `visuals` ([{ title, kind: 'image'|'svg'|'mermaid'|'html'|'canvas', path?|url?|svg?|source? }] — task about UI, a schema or data → at least one screenshot or diagram), plus done/decisions/files/questions. In finishTask `result` also add `notCovered`: what you did not check.
+8. Before `session.done({ id })` call `team.reportTask({ taskId, report })`; pass the same object as `result` to `agent.finishTask`.
+9. Write only what was actually done and checked. Empty `checked` means "not checked".
+10. You are a persona (the brief starts with «Персона») → a hand-in needs memory: `team.reportTask` is rejected unless during the task you created or updated at least one persona memo. Pass `memo: { path, title, description, content | ops }` to `team.reportTask`, or call `team.memoSave({ path, title, description, content | ops, reason })` before. One topic — one memo (`code/<files>.md`, `howto/<trick>.md`, `user/<preferences>.md`), ≤2500 chars: too long → compress or split; outdated → update or `team.memoDelete`.
+11. Task returned to work with a comment («Владелец вернул задачу…», or a task «Доделать: …» with «Комментарий владельца» and «Прошлый отчёт») → it is the same task, do not start over: first read the comment and your previous report, finish what is asked, then report again (`team.reportTask` → `session.done` → `agent.finishTask`).
+<!-- /brief -->
+
+## Manager: review every handed-in task (read by the manager, not injected into children)
+
+A delegated child's `session.done` sends the manager `<team-update event="task.completed" taskId=…>` for every plan task (core `session.done` → `agent.steer`); the task then sits in **Review** on the board. Review has **two passes: your accept is the first pass, the final word and the rating belong to the person.** On each `task.completed`:
+1. Open the report: `agent.team({ agent })` (result) or the plan task `report` — check `checks` (what was verified and how; empty = not checked), `notDone`, `visuals` (look at screenshots with `read` on the image path), `files` (read the diff / file). Run the cheapest check yourself when the claim matters (a call, a test, a screenshot).
+2. Good → `team.accept({ taskId, agentId: <child id> })` (team task: `team.accept({ taskId })`, supervisor only). This is the **first pass**: recorded as `accepted_by = 'manager:<your id>'` (team tasks: `agent_id ''`), the result has `final: false`; the task **stays in Review** marked «проверил <your name> ✓» with your face, sorted above unchecked ones, and waits for the person. It goes to History only after the person's `team.accept` (`final: true`, optionally with stars — the popup's «Принять и оценить» saves `team.rate` in the same action). Do not tell the person a task is «done» after your accept — say it is checked and waits for them.
+3. Not good → `team.reopen({ taskId, agentId, comment })` with a concrete comment: what is wrong, what to redo, how it will be checked. Never "please improve". (Until team.reopen is mounted: `team.feedback` is owner-only — message the child with `agent.message` instead.)
+4. The person's decision wins: they see your accept on the board and can return the task to work over it; you never overwrite a person's accept or reopen.
+5. The person's queue: `team.nextReview({ managerAgentId?, limit? })` → `{ next, items: [{ taskId, agentId?, title, checkedBy, handedInAt }], checked, total }` — your checked tasks first, then the rest, oldest hand-in first.
+Only the child's parent agent (its manager) may accept/reopen its plan tasks; for team tasks the supervisor (owner for the supervisor's own work).
+
+## Task report: how an agent hands in work
+
+Every finished task gets a report card, written by the agent itself. Format `types.team.TaskReport`:
+
+```json
+{ "summary": "1–3 sentences for a person\n---\noptional technical detail",
+  "done": ["what was actually done"],
+  "decisions": [{ "what": "the choice", "why": "the reason" }],
+  "checks": ["what was verified and how — command, test, screenshot; say it as it is, including failures"],
+  "files": ["paths or URLs that were touched or produced"],
+  "questions": ["open questions or risks for the reviewer"],
+  "notDone": ["what of the task is NOT done — [] when everything is done"],
+  "next": [{ "title": "what is worth doing next", "why": "optional reason", "kind": "continue | new" }],
+  "visuals": [{ "title": "caption", "kind": "image | svg | mermaid | html | canvas", "path": "/abs/shot.png", "svg": "<svg…>", "source": "graph TD…", "url": "/rpc/…" }] }
+```
+
+- **`notDone` and `next` are required** (an empty array when there is nothing): short, plain words, one line per item. `next.kind`: `continue` = finish this same task (the owner's «Вернуть в работу» gives it back to you), `new` = a separate new task (the owner's «В бэклог» puts it into the backlog). Do not hide unfinished work in the summary.
+- **Visuals**: when the task is about UI, a schema or data, attach at least one screenshot or diagram. `image` = path to a png/jpg (or http URL), `svg` = inline markup (sanitized) or a path, `mermaid` = source (rendered on the server by mermaid.render), `html` = a small fragment (cleaned by rpc.cleanHtml), `canvas` = a link to a canvas tab or `/rpc/<view>?…` (shown as a button). The card shows them in «Что сделано» right under the summary, 1–2 per row; a click opens it large.
+- Both `team.reportTask({ report })` and `agent.finishTask({ result })` carry these fields; the card reads `plan.tasks[i].report`, else `result.report`, else `result` itself.
+- **Owner buttons** on the card: each «Дальше» item fires once (`team.next({ taskId, agentId?, idx })`, route `POST /team/next`): continue → team task in review gets `changes` (done task → a new task for the same assignee, active task → `say`); delegated child → a notification with the item text (archived child → its manager). new → `team.taskCreate` into the backlog of the task's team (child: the active team its manager supervises); no team → a notification asking the manager to create it. Stored in `team.next`, shown as kind `next` in the history and `team.feed`.
+- **Rating**: «Оценить» 1–5 stars + optional comment (`team.rate`, route `POST /team/rate`) for a task in review/done; stored in `team.rating` (one per task, re-rating replaces), shown on the card, as `★N` in the history and as kind `rating` in `team.feed`. `team.ratings({ agentId? })` → average and latest ratings per executor (for passport/hiring).
+
+- **Team task**: `team.taskTransition({ transition: { action: 'submit', summary, artifacts, verification, report } })`. `team.normalizeReport` normalizes the report and stores it in the immutable submit event (`event.payload.report`). Without `report`, a minimal one is built from summary/artifacts/verification. A resubmit after `changes` writes a new report; the card shows the latest one.
+- **Delegated child (agent.delegate plan)**: before `session.done({ id })` for each task, call `team.reportTask({ taskId, report })`. It goes into `scratchpad.plan.tasks[i].report` of the child's own scratchpad. In `agent.finishTask` pass the same object (or `{ report, ... }`) as `result`.
+- Only write what was actually done and checked. An empty `checks` means "not checked", and the card shows that.
+- Card: `team.taskView({ taskId, agentId? })` in the app popup. A comment from it goes to the assignee (team: `say` + returned for rework; child: `agent.message`, or the manager if the child is archived).
+- «Вернуть в работу» (card bottom bar in review/done, comment required; also the button of a `kind: continue` «Дальше» item, with the item text as the comment) → `team.reopen({ taskId, agentId?, comment, nextIdx? })` (owner or manager): team task — `changes` (or a continuation task when done) to the same assignee, then `team.dispatch` to its persona; live child — plan task back to active, acceptance marks removed, message «Владелец вернул задачу…»; archived child — `team.delegate` to the same persona with «Доделать: <title>» + original task + report + comment. Stored in `team.reopen`, kind `reopen` in `team.feed`, «продолжение → …» link in the card.
+
+## Task wording: human first, agent details below
+
+- **Manager** (agent.delegate `instructions`, team task `instructions`): the first paragraph, up to a line `---`, is the task for a person — 1–3 sentences in plain words, no paths or function names. Everything after `---` is detail for the agent (files, functions, steps, constraints).
+- Card order, top to bottom: header + sticky «Принять»/«Оценить ★»/«Не согласен» → «Задание» → «Что сделано» (summary, visuals, checks line, «Не сделано», «Дальше» with buttons) → «Подробный отчёт» (collapsed) → «История» (collapsed).
+- In «Задание» the human part is open; the agent part is in a collapsed «Детали для агента». Without `---` (old tasks) it shows the first ~200 characters and the full text collapsed.
+- **Assignee**: `summary` of the report (and of `agent.finishTask`) is two layers, like the brief: first 1–3 sentences for a person — what changed for them, in plain words; then a line `---` and the technical detail. The card shows the part before `---` open in «Что сделано» with a one-line «Проверено: …; не проверено: …»; the part after `---`, plus `done`, `decisions`, full `checks`, `notCovered`, `files` and the raw result, sits in the collapsed «Подробный отчёт».
+
+## Estimate and progress: rule for every agent
+
+- **Took a task → `team.estimate({ taskId, size, steps?, note? })`** right after claim/start (or right after receiving a delegated plan, for each plan task id). `size`: `S` — up to ~15 min, `M` — up to an hour, `L` — more. Legacy `minutes` is still accepted and mapped to a size (≤15 → S, ≤60 → M, else L).
+- **Every noticeable step → `team.progress({ taskId, stage, note? })`**: the current stage as text. `percent` and `etaMinutes` are optional legacy fields — do not ask agents for them. For a team task this also counts as a progress report for deadlines.
+- Team tasks: latest values live on `team.task` (`estimate_size`, `estimate_min` (old data), `estimate_steps`, `progress_percent`, `progress_stage`, `progress_eta_min`, `progress_note`, `progress_at`), every call is an `estimate`/`progress` event in the task timeline. Plan tasks of a delegated child: `scratchpad.plan.tasks[i].estimate` / `.progress`.
+- Board reads `team.taskProgress({ teamId } | { taskId } | { agentId, taskId? })` → `{ size, estimateMin, percent, stage, etaMin, startedAt, elapsedMin, overdue }` per task; `size` is `'S'|'M'|'L'|null`, old minute estimates mapped on read. Without a progress report, percent falls back to closed/total tasks of the assignee's agent plan. `overdue` = elapsed > 1.5 × (estimate minutes, else 15 for S / 60 for M; never for L).
+
+## Shared feed: team.post — short notes for the whole team
+
+`team.post({ text, taskId?, kind?: 'note'|'heads-up'|'question'|'done', teamId? })` writes one note (≤280 chars, plain text) into the shared feed; it shows in the board «Хроника» with the author's face and a sign by kind; `taskId` links it to the task card. Stored in `team.post` (created by migration, self-healing on first call); refreshes the live `team` topic.
+
+Write a post when, and only when:
+- you **found something others need** (a bug in a shared function, a gotcha, a decision) → `heads-up`;
+- you **changed a shared file** others may also edit (say which file and what) → `heads-up`;
+- you are **stuck** or need an answer from anyone → `question`;
+- you **finished a big step** that unblocks others → `done`;
+- otherwise a useful observation → `note`.
+
+Do not spam: no post per small step (that is `team.progress`), no repeats of your final report, at most a few per task. One post = one fact, readable without context.
+
+## Reading the chronicle: team.feed — before you take a task or touch a shared file
+
+`team.feed({ managerAgentId?, sinceMs?, limit?: 30, kind?, after?, unread?, all? })` → `{ managerAgentId, mode: 'unread'|'all', cursor, unreadCount, more, working: [{agentId, agentName, taskId, title, scope, percent, stage, since}], entries: [{ts, actor, actorName, byUser, kind, taskId?, agentId?, scope?, subject?, to?, toName?, text}] }`, plain text. It is the very feed the board «Хроника» renders (team.dashboard calls it with `all: true`), so you see what the person sees. Without parameters a delegated child reads its own team: the manager defaults to the caller's parent agent. Kinds: assigned, started, done, tookDone, finished, accepted, feedback, blocked, progress, estimate, message, ask, note, heads-up, post:note|heads-up|question|done (`kind:'post'` = all notes).
+
+Reading only what is new: an agent calling `team.feed({})` gets mode `unread` — only entries after its stored read position (table `team.feed_read`, per agent and manager), oldest first, and the position moves to the last returned entry. So two calls in a row: the second is empty. The first call ever returns the last `limit` entries. `cursor` is `"<ts>:<n>"` (timestamp of the newest returned entry + its rank among entries with the same timestamp); `after: cursor` reads from any cursor (team.brief gives one). `unreadCount` = new entries at call time, `more` = those that did not fit into `limit` (call again). `all: true` (or `unread: false`, or a `sinceMs`/`kind` filter, or a person caller) = the whole feed newest first as before; it never moves the stored position — the board and team.brief read this way.
+
+Rule for every agent:
+1. **When you take a task** call `team.feed({})`: look at `working` (who is busy with what) and recent `done`/`tookDone`/`accepted`/`post:*`. If your work or part of it is already done or in someone's hands, do not redo it — reuse the result, narrow your scope, or ask the owner with `agent.message`.
+2. **Before editing a shared file and at every new step** call `team.feed({})` — you get only what is new since your last read — and look for a `post:heads-up` naming that file or a teammate working on the same module; if found, coordinate first. After the edit write `team.post({ kind: 'heads-up', text: 'changed <file>: <what>' })`.
+3. Write `team.post` only by the rules above; read `feedback` entries on your tasks — they are the owner's disagreement.
+
+The board timeline itself shows events by meaning — took, handed in, stuck, asked, accepted, disagreed, stage changed, estimate — with faces instead of names (name in tooltip), grouped into Сейчас / Последний час / Раньше сегодня, with «Сейчас работают» on top. Noise (deliveries, heartbeats, repeats, started right after assigned, progress without a stage change) is hidden.
+
+## Backlog, groups, queues and interventions
+
+Board order: `team.tasks` sorts by assignee (backlog = no assignee first), then `rank` (lower runs first). Each agent's queue is its assigned tasks read top-down; take the first `assigned` task when the slot is free.
+
+- **Backlog**: `taskCreate` without assignee creates `todo`. Optional `rank` (default: end of queue), `groupKey` (label for related tasks) and `dependsOn` (existing task ids). Any roster agent may `team.claim({taskId})` an unassigned todo; it becomes `assigned` to the caller. Claim fails while any dependency is not `done`. Two concurrent claims: one wins, the other gets `Version conflict`.
+- **Pause**: transition `pause {note}` (assignee, supervisor or owner) moves working/blocked to `paused`, stores the note, clears the deadline and **releases the slot**. Only the assignee may `resume` from paused, and only when the slot is free. Supervisor/owner may `cancel {reason}` a paused task (for example, the user changed their mind); history stays in events. `start` still requires `assigned`.
+
+Three ways to intervene (supervisor or owner):
+1. **Hard preempt**: `team.preempt({urgentTaskId, note, assigneeAgentId?})`, with expectedVersion = team version. In one transaction it pauses the assignee's working/blocked task (its own `pause` event), assigns the urgent task at the head of the queue (lowest rank) and emits a `preempt` event delivered to the assignee. After commit, if the caller is an agent session, the assignee also gets an urgent `agent.message` (wakes it). The running turn is **not** force-stopped: no documented API stops another agent's turn. The result field `interrupt` shows what happened.
+2. **Queue insert**: `team.taskReorder({taskId, rank, assigneeAgentId?})` places never-started todo/assigned work at a position in the backlog or an assignee queue. Fractional ranks insert between neighbours. The assignee picks it up after finishing current work; nothing is interrupted.
+3. **Soft message**: `team.say({text, to, taskId})` in the task thread. It is public, notifies only `to`, and changes no state.
+
+After each committed command (not on replay) the board calls `procs.events.refresh({topic:'team'})` for live views; a refresh error never fails the command. Deadline escalations and delivery flushes refresh too.
+
+## Persona team: members are personas, sessions are replaceable (Рома)
+
+A **persona** (`team.persona`: name, role, responsibilities, icon, prompt, notes, plugins, model, limits, current_agent_id) is a team member that outlives its sessions. A team's personas are `team.team_persona`; every session a persona ever had is `team.persona_session`. Reads: `team.personaGet({name?|agentId?})`; memory through `team.memoSave` (below); prompt/card writes only through `team.personaSave({name, field:'prompt'|'notes'|'card', ops?|text?|revertOf?, reason?, baseVersion?})` (revision in `team.persona_rev`, event kind `persona`); create: `team.personaCreate({name, role, ...})` (owner only).
+
+- **Create the team** (owner, on the board): when the manager has no team, the board shows «Создать команду» (`team.createForm`) — a CSRF form to `POST /team/` with `personas` JSON, the supervisor as the only session member and `activate=1`. `team.create({..., personas})` creates missing personas (face from the latest session with that `agents.meta.persona.name`) and joins them.
+- **Manager hands out work**: `team.delegate({agent, title, human, details?, persona})`. With an active persona team (and no explicit `tasks`) it first creates the task in the team backlog (`taskCreate`, instructions = human `---` details), then `team.dispatch({teamId, taskId, persona})`: the persona's live, free session gets a new plan with the task, otherwise a new session is delegated with the persona brief and bound to the persona (`personaBind`, open tasks of a dead previous session move to it). Returns `{taskId, id, status, persona, teamId, mode:'reuse'|'new'}`. Without a team — the old behaviour.
+- **Handing in**: the plan task id equals the team task id and is linked in `team.task_link`; `team.reportTask({taskId, report})` then starts (if needed) and submits the team task → **review** with the report. No message to the manager is needed.
+- **Review**: `team.accept` → done; `team.feedback`/«Вернуть» → changes (assigned to the same session) and `team.dispatch({teamId, taskId, note})` resends it — the same session if alive and free, else a new session of the same persona with the task text and comment; «Дальше» new → `taskCreate` in the backlog.
+- **Leaving**: `team.fire` / last task accepted → `team.retire` (Ян): last turn to update the persona, then archive. The persona and its memos stay.
+- **Memory = memos** (Ян): `team.persona_memo` (persona, path, title, description, content, version, soft delete). `team.memoSave({name?, path, title?, description?, content?|ops?|revertOf?, reason?, baseVersion?})` (owner or a session of the persona; name defaults to the caller's persona; ≤ limits.memoChars 2500 per memo — longer is rejected with «compress or split», never cut; ≤ limits.memoCount 60), `team.memoDelete({name?, path})` (soft, revertable), `team.memoSearch({name?, query?, withContent?})` (table of contents, ranked by query words), `team.memoRead({name?, path})` (+ revisions). Every change is a `team.persona_rev` row with field `memo`, `path`, meta {title, description, deleted}. The brief shows the table of contents and the full text of ≤3 memos relevant to the task (query = task title + text, ≤3500 chars). The old `notes` field was moved into memo `notes/legacy.md`; the persona page shows the memos and their history with «Откатить к этой».
+- **Binding**: a session started by `team.delegate({persona})` outside a team is written to `team.persona_session` right away (before, only `personaBind` in a team did it, so personaSave rejected those sessions as «not the persona» — the reason memory stayed empty).
+- Commands in executeCommand: `personaJoin {name}`, `personaBind {name, agentId, moveOpen?}`, `personaLeave {name, reason}` (supervisor or owner; advance team version).
+
+## Hiring and firing (dynamic roster)
+
+Only the supervisor (manager) or the owner, only in an active team; expectedVersion = team version; both advance it.
+
+- **Hire**: `team.hire({teamId, requestKey, expectedVersion, persona:{name, role, skills?, allowed?}, brief?, model?, workspaceDir?})`. Creates a new persistent session: child of the supervisor, empty transcript (gets the passport, not the history), visibility team, model and workspace of the supervisor by default. The passport (team goal, supervisor, role, skills = what it can do, allowed = what it may do, brief, rules) goes into the session system prompt and `agents.meta.persona`; the member row stores `persona`, `joined_at`, `hired_by`. A public `memberHire` event is written, then the newcomer is started with the passport (agent.message from an agent caller, agent.wake from an owner HTTP call). Roster limit 30. An agent id that ever was in the team cannot be re-added. Exact retry returns the same agentId; no second session.
+- **Fire**: `team.fire({teamId, requestKey, expectedVersion, memberId, reason, reassignTo?, archiveSession?})`. The supervisor cannot be fired. In one command every unfinished task of the member (assigned, working, blocked, paused, review) goes back to the backlog as `todo` without assignee, or to `reassignTo` as `assigned` at the end of its queue. This is the one explicit exception to "fixed assignee after first start": the start marker, submission and deadline are reset and `paused_note` says where the task came from. The member gets `left_at`/`left_reason`, loses all roster rights (cannot read, claim or be assigned), its open notifications become `cancelled`. A public `memberFire` event lists the returned tasks. After commit a session hired by team.hire is archived (jobs cancelled); a hand-made member session is archived only with `archiveSession:true`.
+- Questions to the user: members ask the supervisor with ordinary `agent.message`; the supervisor talks to the user. There is no separate ask command.
+
+Storage is exclusively PostgreSQL `team.team`, `team.member`, `team.task`, `team.event`, `team.command`, `team.delivery`, plus personas `team.persona`, `team.persona_rev`, `team.team_persona`, `team.persona_session`, `team.task_link`. Maintenance uses trusted cron authority and core atomic notification enqueue, never raw core table writes or an impersonated agent. Failed deliveries are visible and owner-retryable. Transport receipt means accepted notification, not task completion or exactly-once external actions.
+
+Known limits: manual dedicated-session bootstrap; single security domain/trusted agents; no automatic reassign (fire reassigns explicitly), private team messages or sandbox; generic cron lifecycle deployment must be verified separately. No autonomous outward-action authorization is granted by board review.

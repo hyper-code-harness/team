@@ -1,0 +1,202 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/reduceTask.test.ts:
+(pass) pure team reducer: state and immutable snapshots > start acquires work, records first start, arms deadline, increments version exactly once [0.28ms]
+(pass) pure team reducer: state and immutable snapshots > block retains started identity; resume clears reason and rearms deadline [0.06ms]
+(pass) pure team reducer: state and immutable snapshots > submit leaves working state, clears deadline and pins supplied evidence event ID [0.06ms]
+(pass) pure team reducer: state and immutable snapshots > approve preserves evidence reference and prior immutable review snapshot [0.03ms]
+(pass) pure team reducer: state and immutable snapshots > changes/restart/resubmit produce a new reference without rewriting old evidence [0.12ms]
+(pass) pure team reducer: state and immutable snapshots > start rejects todo without changing state [0.03ms]
+(pass) pure team reducer: state and immutable snapshots > start rejects working without changing state
+(pass) pure team reducer: state and immutable snapshots > start rejects blocked without changing state
+(pass) pure team reducer: state and immutable snapshots > start rejects review without changing state
+(pass) pure team reducer: state and immutable snapshots > start rejects done without changing state
+(pass) pure team reducer: state and immutable snapshots > start rejects cancelled without changing state
+(pass) pure team reducer: state and immutable snapshots > block rejects todo without changing state
+(pass) pure team reducer: state and immutable snapshots > block rejects assigned without changing state
+(pass) pure team reducer: state and immutable snapshots > block rejects blocked without changing state
+(pass) pure team reducer: state and immutable snapshots > block rejects review without changing state
+(pass) pure team reducer: state and immutable snapshots > block rejects done without changing state
+(pass) pure team reducer: state and immutable snapshots > block rejects cancelled without changing state
+(pass) pure team reducer: state and immutable snapshots > resume rejects todo without changing state
+(pass) pure team reducer: state and immutable snapshots > resume rejects assigned without changing state
+(pass) pure team reducer: state and immutable snapshots > resume rejects working without changing state
+(pass) pure team reducer: state and immutable snapshots > resume rejects review without changing state
+(pass) pure team reducer: state and immutable snapshots > resume rejects done without changing state [0.01ms]
+(pass) pure team reducer: state and immutable snapshots > resume rejects cancelled without changing state
+(pass) pure team reducer: state and immutable snapshots > submit rejects todo without changing state
+(pass) pure team reducer: state and immutable snapshots > submit rejects assigned without changing state
+(pass) pure team reducer: state and immutable snapshots > submit rejects blocked without changing state
+(pass) pure team reducer: state and immutable snapshots > submit rejects review without changing state
+(pass) pure team reducer: state and immutable snapshots > submit rejects done without changing state
+(pass) pure team reducer: state and immutable snapshots > submit rejects cancelled without changing state
+(pass) pure team reducer: state and immutable snapshots > approve rejects todo without changing state
+(pass) pure team reducer: state and immutable snapshots > approve rejects assigned without changing state
+(pass) pure team reducer: state and immutable snapshots > approve rejects working without changing state
+(pass) pure team reducer: state and immutable snapshots > approve rejects blocked without changing state
+(pass) pure team reducer: state and immutable snapshots > approve rejects done without changing state
+(pass) pure team reducer: state and immutable snapshots > approve rejects cancelled without changing state
+(pass) pure team reducer: state and immutable snapshots > changes rejects todo without changing state
+(pass) pure team reducer: state and immutable snapshots > changes rejects assigned without changing state [0.01ms]
+(pass) pure team reducer: state and immutable snapshots > changes rejects working without changing state [0.03ms]
+(pass) pure team reducer: state and immutable snapshots > changes rejects blocked without changing state [0.01ms]
+(pass) pure team reducer: state and immutable snapshots > changes rejects done without changing state
+(pass) pure team reducer: state and immutable snapshots > changes rejects cancelled without changing state
+(pass) pure team reducer: state and immutable snapshots > arbitrary status mutation action is rejected [0.02ms]
+(pass) authority > only agent assignee can start; reject supervisor/agent [0.02ms]
+(pass) authority > only agent assignee can start; reject owner/user
+(pass) authority > only agent assignee can start; reject other-worker/agent
+(pass) authority > only agent assignee can start; reject worker/user
+(pass) authority > only agent assignee can block; reject supervisor/agent
+(pass) authority > only agent assignee can block; reject owner/user
+(pass) authority > only agent assignee can block; reject other-worker/agent
+(pass) authority > only agent assignee can block; reject worker/user
+(pass) authority > only agent assignee can resume; reject supervisor/agent
+(pass) authority > only agent assignee can resume; reject owner/user
+(pass) authority > only agent assignee can resume; reject other-worker/agent
+(pass) authority > only agent assignee can resume; reject worker/user
+(pass) authority > only agent assignee can submit; reject supervisor/agent
+(pass) authority > only agent assignee can submit; reject owner/user [0.01ms]
+(pass) authority > only agent assignee can submit; reject other-worker/agent
+(pass) authority > only agent assignee can submit; reject worker/user
+(pass) authority > worker cannot approve [0.04ms]
+(pass) authority > other-worker cannot approve
+(pass) authority > owner may approve ordinary work [0.02ms]
+(pass) authority > supervisor cannot self-approve; owner can review supervisor work [0.03ms]
+(pass) authority > worker cannot changes
+(pass) authority > other-worker cannot changes
+(pass) authority > owner may changes ordinary work
+(pass) authority > supervisor cannot self-changes; owner can review supervisor work
+(pass) one working/blocked slot > start rejects an occupied slot [0.03ms]
+(pass) one working/blocked slot > start accepts empty or same-task slot: null [0.02ms]
+(pass) one working/blocked slot > start accepts empty or same-task slot: task-1
+(pass) one working/blocked slot > resume rejects an occupied slot
+(pass) one working/blocked slot > resume accepts empty or same-task slot: null
+(pass) one working/blocked slot > resume accepts empty or same-task slot: task-1
+(pass) cancel only never-started work > owner cancels never-started todo [0.02ms]
+(pass) cancel only never-started work > supervisor cancels never-started todo
+(pass) cancel only never-started work > assignee cannot cancel todo [0.02ms]
+(pass) cancel only never-started work > owner cancels never-started assigned
+(pass) cancel only never-started work > supervisor cancels never-started assigned
+(pass) cancel only never-started work > assignee cannot cancel assigned
+(pass) cancel only never-started work > owner cannot cancel started todo, including epoch-zero start [0.01ms]
+(pass) cancel only never-started work > supervisor cannot cancel started todo, including epoch-zero start
+(pass) cancel only never-started work > owner cannot cancel started assigned, including epoch-zero start
+(pass) cancel only never-started work > supervisor cannot cancel started assigned, including epoch-zero start
+(pass) cancel only never-started work > owner cannot cancel started working, including epoch-zero start
+(pass) cancel only never-started work > supervisor cannot cancel started working, including epoch-zero start
+(pass) cancel only never-started work > cancel rejects working even with null start marker [0.01ms]
+(pass) cancel only never-started work > owner cannot cancel started blocked, including epoch-zero start
+(pass) cancel only never-started work > supervisor cannot cancel started blocked, including epoch-zero start
+(pass) cancel only never-started work > cancel rejects blocked even with null start marker
+(pass) cancel only never-started work > owner cannot cancel started review, including epoch-zero start
+(pass) cancel only never-started work > supervisor cannot cancel started review, including epoch-zero start
+(pass) cancel only never-started work > cancel rejects review even with null start marker
+(pass) cancel only never-started work > owner cannot cancel started done, including epoch-zero start
+(pass) cancel only never-started work > supervisor cannot cancel started done, including epoch-zero start
+(pass) cancel only never-started work > cancel rejects done even with null start marker
+(pass) cancel only never-started work > owner cannot cancel started cancelled, including epoch-zero start
+(pass) cancel only never-started work > supervisor cannot cancel started cancelled, including epoch-zero start
+(pass) cancel only never-started work > cancel rejects cancelled even with null start marker
+(pass) cancel only never-started work > changes do not restore permission to cancel previously started work [0.02ms]
+(pass) evidence and deadline validation > approve requires current immutable submission reference [0.03ms]
+(pass) evidence and deadline validation > approve requires a nonblank reason [0.03ms]
+(pass) evidence and deadline validation > changes requires current immutable submission reference
+(pass) evidence and deadline validation > changes requires a nonblank reason
+(pass) evidence and deadline validation > block requires a reason [0.02ms]
+(pass) evidence and deadline validation > submission requires summary [0.02ms]
+(pass) evidence and deadline validation > submission requires verification
+(pass) evidence and deadline validation > submission requires artifacts array but accepts an explicit empty array [0.03ms]
+(pass) evidence and deadline validation > rejects nonfinite transaction time NaN [0.02ms]
+(pass) evidence and deadline validation > rejects nonfinite transaction time Infinity
+(pass) evidence and deadline validation > rejects nonfinite transaction time -Infinity
+(pass) evidence and deadline validation > rejects deadline policy out of bounds: 999 [0.01ms]
+(pass) evidence and deadline validation > rejects deadline policy out of bounds: 86400001
+(pass) evidence and deadline validation > rejects deadline policy out of bounds: -1
+(pass) evidence and deadline validation > rejects deadline policy out of bounds: Infinity
+(pass) evidence and deadline validation > accepts inclusive deadline policy bound: 1000 [0.02ms]
+(pass) evidence and deadline validation > accepts inclusive deadline policy bound: 86400000
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > roster agent claims unassigned todo without dependencies [0.03ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim succeeds when every dependency is done [0.04ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim denied while a dependency is not done or unknown [0.06ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > owner (user) cannot claim [0.02ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim rejects assigned [0.01ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim rejects working
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim rejects blocked
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim rejects review
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim rejects done
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim rejects cancelled
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > claim rejects todo that already has an assignee [0.01ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > worker pauses working: note stored, deadline cleared, slot released [0.03ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > supervisor pauses working: note stored, deadline cleared, slot released
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > owner pauses working: note stored, deadline cleared, slot released
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > worker pauses blocked: note stored, deadline cleared, slot released
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > supervisor pauses blocked: note stored, deadline cleared, slot released
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > owner pauses blocked: note stored, deadline cleared, slot released
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > outsider agent cannot pause [0.01ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > pause requires a note [0.03ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > pause rejects todo [0.02ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > pause rejects assigned
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > pause rejects review
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > pause rejects done
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > pause rejects cancelled [0.01ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > assignee resumes paused with free slot: note cleared, deadline rearmed [0.03ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > resume from paused needs a free slot [0.02ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > supervisor cannot resume someone else paused task [0.01ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > supervisor cancels paused work with a reason [0.02ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > owner cancels paused work with a reason
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > cancel paused requires a reason [0.01ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > assignee cannot cancel paused work [0.01ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > start from paused is rejected (start requires assigned) [0.01ms]
+(pass) backlog claim, pause/preempt, resume from paused, cancel paused > paused cannot be submitted [0.01ms]
+
+tests/routes.test.ts:
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > GET index: no session returns 401 before runtime calls [0.31ms]
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > GET index: no user returns 401 before runtime calls [0.01ms]
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > GET index: no trusted request returns 401 before runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > GET detail: no session returns 401 before runtime calls [0.23ms]
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > GET detail: no user returns 401 before runtime calls [0.01ms]
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > GET detail: no trusted request returns 401 before runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: no session returns 401 before runtime calls [0.16ms]
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: no user returns 401 before runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: no trusted request returns 401 before runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: no session returns 401 before runtime calls [0.19ms]
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: no user returns 401 before runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: no trusted request returns 401 before runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: missing Origin returns 403 without runtime calls [0.06ms]
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: foreign Origin returns 403 without runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: cross-site returns 403 without runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: content-type null returns 415 [0.04ms]
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: content-type application/json returns 415
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST create: content-type multipart/form-data returns 415
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: missing Origin returns 403 without runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: foreign Origin returns 403 without runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: cross-site returns 403 without runtime calls
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: content-type null returns 415
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: content-type application/json returns 415
+(pass) HTTP authentication and same-origin form boundary (mock runtime) > POST command: content-type multipart/form-data returns 415
+(pass) team access response contracts > GET detail: denied unknown-team maps to non-disclosing 404 [0.06ms]
+(pass) team access response contracts > GET detail: denied foreign-team maps to non-disclosing 404
+(pass) team access response contracts > POST command: denied unknown-team maps to non-disclosing 404 [0.02ms]
+(pass) team access response contracts > POST command: denied foreign-team maps to non-disclosing 404
+(pass) team access response contracts > command additionally rejects a readable non-owner team with 403 [0.07ms]
+(pass) activation and maintenance wiring, no live mutations > owner activation configures maintenance before command with unchanged intent [0.06ms]
+(pass) activation and maintenance wiring, no live mutations > configuration failure returns 409 and never activates [0.04ms]
+(pass) activation and maintenance wiring, no live mutations > repair submits configuration only, without requiring command version/key [0.03ms]
+(pass) activation and maintenance wiring, no live mutations > repair failure returns 409 without domain command [0.03ms]
+(pass) activation and maintenance wiring, no live mutations > archive does not configure maintenance [0.03ms]
+(pass) HTML contracts > index escapes hostile title/goal/supervisor and encodes team URL [0.09ms]
+(pass) HTML contracts > detail escapes task, member, event payload, errors and filter attributes [0.29ms]
+(pass) HTML contracts > draft owner: repair grant form visibility [0.05ms]
+(pass) HTML contracts > draft reader: repair grant form visibility [0.03ms]
+(pass) HTML contracts > active owner: repair grant form visibility [0.03ms]
+(pass) HTML contracts > active reader: repair grant form visibility [0.02ms]
+(pass) HTML contracts > archived owner: repair grant form visibility [0.01ms]
+(pass) HTML contracts > archived reader: repair grant form visibility
+(pass) HTML contracts > pending delivery displays honest cron readiness warning [0.12ms]
+(pass) HTML contracts > ready tracked worker is displayed distinctly and reason is escaped [0.05ms]
+
+ 192 pass
+ 0 fail
+ 365 expect() calls
+Ran 192 tests across 2 files. [11.00ms]

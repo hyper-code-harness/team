@@ -1,0 +1,4 @@
+{
+  "name": "team", "version": "0.1.0", "type": "module",
+  "procs": {"src":"src", "label":"Team", "icon":"ph-users-three", "optional":true, "description":"Persistent fixed-roster teams with a transactional board, public timeline and explicit review."}
+}

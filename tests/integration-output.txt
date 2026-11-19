@@ -1,0 +1,26 @@
+bun test v1.4.4 (38afee6c8)
+
+tests/integration.test.ts:
+{"disposableContainer":"hyper-team-test-9587e7fb-6b5","image":"postgres:17","host":"127.0.0.1","port":60944,"database":"team_test"}
+(pass) fail-closed URL refuses production/default ports [0.11ms]
+(pass) creation and command exact replay; conflicting replay changes nothing [43.98ms]
+(pass) real concurrent team CAS permits exactly one board mutation [26.08ms]
+(pass) real concurrent starts enforce one working slot [40.85ms]
+(pass) started assignment immutable, stale submission rejected after changes and resubmit [75.14ms]
+(pass) late command write failure rolls back task/event/outbox/sequence and command [34.50ms]
+(pass) active membership unique across teams, failed activation atomic [18.91ms]
+(pass) outsider denied, agent cannot inherit owner authority, foreign-owned roster rejected [13.90ms]
+(pass) authorized get/list/tasks/sync and exact sequence pagination [21.48ms]
+(pass) archive exact replay works after archived status [110.07ms]
+(pass) deadline batches handle over twenty tasks without starvation or duplicate generations [186.06ms]
+(pass) maintenance scoped authority, deadline dedup, mocked delivery only [116.31ms]
+(pass) queue migration is idempotent and paused requires an assignee [10.08ms]
+(pass) claim race: two agents claim one backlog task, exactly one wins; dependencies gate claim [28.98ms]
+(pass) preempt pauses current work, heads the queue, emits preempt delivery and an urgent message [71.01ms]
+(pass) taskReorder queues work for an assignee and tasks orders by assignee, rank [34.14ms]
+Removed disposable container hyper-team-test-9587e7fb-6b5
+
+ 16 pass
+ 0 fail
+ 84 expect() calls
+Ran 16 tests across 1 file. [2.21s]
