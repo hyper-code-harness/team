@@ -272,7 +272,7 @@ test('submit stores normalized report in event payload; owner feedback reopens r
   await transition({ action: 'start' }, 1);
   const sub = await transition({ action: 'submit', summary: 'Done', artifacts: ['a.ts'], verification: 'bun test', report: { summary: 'Did it', decisions: [{ what: 'X', why: 'Y' }, 'Z'], questions: ['Q?'] } }, 2);
   const ev = (await query({ sql: 'SELECT payload FROM team.event WHERE id=?', params: [sub.eventId] }))[0];
-  expect(ev.payload.report).toEqual({ summary: 'Did it', done: [], decisions: [{ what: 'X', why: 'Y' }, { what: 'Z', why: '' }], checks: ['bun test'], files: ['a.ts'], questions: ['Q?'] });
+  expect(ev.payload.report).toEqual({ summary: 'Did it', done: [], decisions: [{ what: 'X', why: 'Y' }, { what: 'Z', why: '' }], checks: ['bun test'], files: ['a.ts'], questions: ['Q?'], next: [], notDone: [], visuals: [] });
   const back = await human(() => ctx.fns.team.feedback({ taskId, text: 'Не согласен: переделай' }));
   expect(back).toMatchObject({ kind: 'team', delivered: 'changes', reopened: true, to: f.roster[1] });
   const t = (await query({ sql: 'SELECT status FROM team.task WHERE id=?', params: [taskId] }))[0];
