@@ -3,7 +3,7 @@
  *
  * The rules come from one place: the block between <!-- brief --> and <!-- /brief --> in the team plugin SKILL.md (estimate/progress, two-layer summary, result fields checked/notCovered/notDone/next/visuals, team.feed, team.post). Below them goes the current context from team.feed (read with all: true, so nobody's read cursor moves): «Сейчас работают», the last 5 entries and the feed cursor — the agent's first team.feed({ after: cursor }) then returns only what appeared after the brief, and later team.feed({}) calls go on from there. team.delegate appends this text to every task it hands out; an agent can also call it itself at the start of a task.
  *
- * Persona: when the agent is a session of a persona (team.persona_session / persona.current_agent_id), or opts.persona names one (team.delegate before the child exists), the brief starts with the persona block, capped at ~6000 characters: passport (name, role, responsibilities, model), persona prompt, the memory — table of contents of the persona's memos (team.memoSearch: path, title, description) and the full text of up to 3 memos most relevant to opts.query (the task title/text; ≤3500 characters together), the last 5 finished tasks of its sessions with the gist of the result and ★ rating, its plugins (2–3 lines from each SKILL.md and a plugins.read hint) and the rule that a hand-in (team.reportTask) needs at least one memo created or updated; then a line --- and the rules and feed as before.
+ * Persona: when the agent is a session of a persona (team.persona_session / persona.current_agent_id), or opts.persona names one (team.delegate before the child exists), the brief starts with the persona block, capped at ~6000 characters: passport (name, role, responsibilities, model), persona prompt, the memory — table of contents of the persona's memos (team.memoSearch: path, title, description) and the full text of up to 3 memos most relevant to opts.query (the task title/text; ≤3500 characters together), the last 5 finished tasks of its sessions with the gist of the result and ★ rating, a line pointing to team.historySearch / team.sessionSearch / team.sessionRead (search own past tasks and old sessions), its plugins (2–3 lines from each SKILL.md and a plugins.read hint) and the rule that a hand-in (team.reportTask) needs at least one memo created or updated; then a line --- and the rules and feed as before. Right after the passport goes «Непрочитанные отзывы владельца»: owner ratings/comments from team.feedback_inbox (status queued or briefed — no live session got them) with the instruction to reflect them in memory first; listed rows become briefed, team.reportTask with a memo write marks them reflected.
  * @param opts.persona Persona name to brief as, when the session does not exist yet.
  * @param opts.agentId Agent the brief is for; its parent is taken as the team manager for the feed. Default: the caller.
  * @param opts.taskId Task id the agent is about to work on; named in the brief so estimate/progress/post use it.
@@ -73,6 +73,13 @@ async function personaBlock(ctx: Context, agentId: string, name: string, query: 
     const out: string[] = [`Персона: ${p.name}${p.role ? ' — ' + p.role : ''} (версия ${p.version})`];
     if (p.responsibilities.trim()) out.push(`Отвечает за: ${cut(p.responsibilities.trim(), 400)}`);
     if (p.model) out.push(`Модель: ${p.model}`);
+    // owner feedback that no session has reflected yet (team.reflect queue) — first item, must go into memory
+    const fb = await ctx.fns.procs.db.select({ sql: "SELECT id, kind, task_id, title, stars, comment FROM team.feedback_inbox WHERE persona_name = ? AND status IN ('queued','briefed') ORDER BY created_at LIMIT 10", params: [p.name] }).catch(() => []) as Row[];
+    if (fb.length) {
+        out.push('', `Непрочитанные отзывы владельца (${fb.length}) — сначала отрази их в памяти: вывод «что повторять, чего избегать» в team.memoSave (user/feedback.md или тематическое мемо), при необходимости team.personaSave field prompt (раздел <!-- owner --> не трогать). Задачи не переделывай; отметятся прочитанными при сдаче с записью в память:`);
+        for (const f of fb) out.push(`- «${cut(String(f.title), 80)}» (${f.task_id}): ${f.kind === 'rating' ? '★' + f.stars : 'комментарий'}${f.comment ? ' — ' + cut(String(f.comment).replace(/\s+/g, ' '), 300) : ''}`);
+        await ctx.fns.procs.db.run({ sql: "UPDATE team.feedback_inbox SET status = 'briefed', briefed_at = COALESCE(briefed_at, ?) WHERE id = ANY(?::text[]) AND status = 'queued'", params: [Date.now(), fb.map(f => String(f.id))] }).catch(() => {});
+    }
     out.push('', 'Промпт персоны (как ей лучше работать):', p.prompt.trim() ? cut(p.prompt.trim(), 2000) : '(пусто)');
     // memory: table of contents of all memos + full text of the few most relevant to the task
     const toc = await ctx.fns.team.memoSearch({ name: p.name, limit: 60 });
@@ -114,6 +121,7 @@ async function personaBlock(ctx: Context, agentId: string, name: string, query: 
         out.push('', 'Последние задачи персоны:');
         for (const t of done.slice(0, 5)) out.push(`- ${cut(t.title, 80)}${t.stars ? ' ' + '★'.repeat(t.stars) : ''}${t.gist ? ' — ' + cut(t.gist.replace(/\s+/g, ' '), 160) : ''}`);
     }
+    out.push('', 'Не начинай с нуля — поищи в своей истории: team.historySearch({ query }) — прошлые задачи (задание, отчёт, оценка и комментарий владельца); team.sessionSearch({ query }) — переписка старых сессий, затем team.sessionRead({ agentId, fromIdx }) — окрестность.', 'Чужая область (файлы, за которые отвечает коллега): сначала поищи у него — те же функции с persona: \'Даша\' (или \'*\'), его память — team.memoSearch({ name, query }) / team.memoRead({ name, path }) (только чтение). Не нашёл или собираешься менять его код — спроси: team.ask({ persona, question, taskId }); ответ придёт сообщением, не жди в цикле. Пришёл вопрос с askId — ответь один раз team.answer({ askId, text }).');
 
     if (p.plugins.length) {
         out.push('', 'Плагины персоны (подробно — plugins.read({ name })):');

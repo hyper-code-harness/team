@@ -1,7 +1,7 @@
 /**
  * Finish a pending team.retire: archive the session once it saved its persona or the time ran out
  *
- * Runs from the cron task team-retire:<agentId> that team.retire registers; every argument except agentId is read from that task row, never from the caller. Archives (session.archive, ends team.persona_session) when the session wrote a persona revision after the retire started and is idle, or when the deadline passed; otherwise does nothing and waits for the next tick. On archive removes the cron task and writes one team.post note with the short diff of what the session changed (or that it left without updating its memory). No pending retire: returns status 'none'.
+ * Runs from the cron task team-retire:<agentId> that team.retire registers; every argument except agentId is read from that task row, never from the caller. Archives (session.archive, ends team.persona_session) when the session wrote a persona revision after the retire started and is idle (args.quiet — team.close after reflecting: as soon as it is idle), or when the deadline passed; otherwise does nothing and waits for the next tick. On archive removes the cron task, marks the owner's rating that triggered the leave (args.inboxId, team.feedback_inbox) reflected when the session saved something (else queues it for the next session's brief), and writes one team.post note naming that rating (args.stars) with the short diff of what the session changed (or that it left without updating its memory). No pending retire: returns status 'none'.
  * @param opts.agentId Session whose retire is pending.
  */
 export default async function (
@@ -25,15 +25,17 @@ export default async function (
     const saved = revs.length > 0;
     const idle = !ag || ag.archived_at != null || String(ag.run_state ?? 'idle') === 'idle';
     const timedOut = now >= deadlineAt;
-    if (!timedOut && !(saved && idle)) return { agentId, status: 'waiting', saved, timedOut, summary: '' };
+    if (!timedOut && !((saved || a.quiet) && idle)) return { agentId, status: 'waiting', saved, timedOut, summary: '' };
 
     // Claim the finish atomically: only the caller that removes the cron row archives and posts (cron tick and a manual call can race).
     const claimed = await ctx.fns.procs.db.select({ sql: 'DELETE FROM cron_tasks WHERE name = ? RETURNING name', params: [task] }) as Row[];
     if (!claimed.length) return { agentId, status: 'none', saved, timedOut, summary: '' };
     if (ag && ag.archived_at == null) { try { await ctx.fns.session.archive({ id: agentId }); } catch {} }
     await ctx.fns.procs.db.run({ sql: 'UPDATE team.persona_session SET ended_at = ? WHERE agent_id = ? AND ended_at IS NULL', params: [now, agentId] });
+    // the rating that triggered the leave: reflected when the session saved something, else back to the queue for the next session's brief
+    if (a.inboxId) { try { await ctx.fns.procs.db.run({ sql: saved ? "UPDATE team.feedback_inbox SET status = 'reflected', reflected_at = ? WHERE id = ?" : "UPDATE team.feedback_inbox SET status = 'queued', to_agent_id = NULL WHERE id = ? AND status = 'sent'", params: saved ? [now, String(a.inboxId)] : [String(a.inboxId)] }); } catch {} }
     const diff = revs.map(r => String(r.summary ?? '').trim() || String(r.field)).join('; ');
-    const summary = saved ? `${persona}: сессия ${agentId} в архиве (${a.reason}); память обновлена — ${diff}` : `${persona}: сессия ${agentId} в архиве (${a.reason}) без обновления памяти${timedOut ? ' — истекло время' : ''}`;
+    const summary = (saved || a.quiet) ? `${persona}: сессия ${agentId} в архиве (${a.reason}${a.stars ? ', оценка ★' + a.stars : ''}); ${saved ? 'память обновлена — ' + diff : 'выводы записаны до закрытия задачи'}` : `${persona}: сессия ${agentId} в архиве (${a.reason}${a.stars ? ', оценка ★' + a.stars : ''}) без обновления памяти${timedOut ? ' — истекло время' : ''}`;
     const text = summary.replace(/\s+/g, ' ').slice(0, 280);
     try {
         const teamRow = (await ctx.fns.procs.db.select({ sql: 'SELECT team_id FROM team.persona_session WHERE agent_id = ?', params: [agentId] }) as Row[])[0];

@@ -97,7 +97,7 @@ export default async function (
         sql: `SELECT agent_id, ts, payload::jsonb->'agentMessage'->>'from' AS sender, left(payload::jsonb->'agentMessage'->>'body', 300) AS body
               FROM events WHERE agent_id = ANY(?::text[]) AND type = 'user' AND jsonb_exists(payload::jsonb, 'agentMessage') ORDER BY idx DESC LIMIT 40`,
         params: [agentIds] }) as Row[] : [];
-    const msgs = msgRows.filter(m => teamSet.has(String(m.sender ?? '')) && !/^\s*You are a delegated (sub)?agent/i.test(String(m.body ?? '')));
+    const msgs = msgRows.filter(m => teamSet.has(String(m.sender ?? '')) && !/^\s*You are a delegated (sub)?agent/i.test(String(m.body ?? '')) && !/\(askId [0-9a-f-]{8,}\)/.test(String(m.body ?? ''))); // team.ask/answer: their posts already tell it
 
     // ---- persona edits (team.persona_rev): prompt / notes / card of personas whose sessions are in this team, or of personas on its teams; missing table = none yet
     let revs: Row[] = [];

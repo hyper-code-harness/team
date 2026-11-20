@@ -312,3 +312,179 @@ test('team.reopen: review → changes to the same assignee with the comment; don
   expect((await query({ sql: 'SELECT new_task_id FROM team.reopen WHERE task_id=? AND action=?', params: [taskId, 'continueTask'] }))[0].new_task_id).toBe(cont.newTaskId);
   void sub;
 });
+test('team.rate → persona reflects: live session gets a message, repeat dedups, no session → queued into the brief', async () => {
+  // minimal host tables the persona path reads (agents, cron_tasks) + every team migration after the queue one
+  await query({ sql: "CREATE TABLE IF NOT EXISTS agents (id text PRIMARY KEY, parent_id text, archived_at bigint, run_state text, scratchpad jsonb, meta jsonb, created_at bigint)" });
+  await query({ sql: "CREATE TABLE IF NOT EXISTS cron_tasks (name text PRIMARY KEY, fn text, args jsonb, enabled boolean DEFAULT true)" });
+  const raw = { fns: { procs: { db: { exec: ({ sql: text }: any) => sql.unsafe(text) } } } }; // jsonb `?` operator in migrations: no placeholder rewrite
+  for (const k of Object.keys(runtime).filter(k => k.startsWith('$migration_') && k > '$migration_20291020000100_team_queue').sort()) await runtime[k].up(raw);
+  ctx.fns.cron.add = async (o: any) => { await query({ sql: 'INSERT INTO cron_tasks(name, fn, args) VALUES (?, ?, ?::jsonb) ON CONFLICT (name) DO UPDATE SET args = EXCLUDED.args, enabled = true', params: [o.name, o.fn, JSON.stringify(o.args)] }); return o; };
+  const f = await fixture(); const worker = f.roster[1];
+  const done = async (taskId: string) => {
+    await f.add(taskId);
+    const tr = (transition: any, version: number) => member(worker, () => f.command({ action: 'taskTransition', taskId, transition }, version));
+    await tr({ action: 'start' }, 1);
+    await tr({ action: 'submit', summary: 'Done', artifacts: [], verification: 'bun test', report: { summary: 'ok' } }, 2);
+  };
+  const now = Date.now(); const pname = `Рома-${f.id}`;
+  await query({ sql: "INSERT INTO agents(id, created_at) VALUES (?, ?)", params: [worker, now] });
+  await query({ sql: "INSERT INTO team.persona(name, owner_user_id, current_agent_id, created_at, updated_at) VALUES (?, 'owner', ?, ?, ?)", params: [pname, worker, now, now] });
+  await query({ sql: 'INSERT INTO team.persona_session(agent_id, persona_name, started_at) VALUES (?, ?, ?)', params: [worker, pname, now] });
+  await f.add(`${f.id}-r0`); // another open task: the rating of r1 accepts it but is not the session's farewell
+  const t1 = `${f.id}-r1`; await done(t1);
+  const before = notifications.length;
+  const r = await human(() => ctx.fns.team.rate({ taskId: t1, stars: 3, comment: 'мало тестов' }));
+  expect(r.reflect).toMatchObject({ status: 'sent', persona: pname, to: worker });
+  expect(r.closed).toBe(false); // the owner only rates; the executor decides
+  expect(notifications.at(-1).text).toContain('team.close'); expect(notifications.at(-1).text).toContain('team.rework');
+  expect(notifications.length).toBe(before + 1);
+  const note = notifications.at(-1);
+  expect(note.to).toBe(worker); expect(note.text).toContain('★3'); expect(note.text).toContain('мало тестов'); expect(note.text).toContain('team.memoSave');
+  expect((await query({ sql: "SELECT text FROM team.post WHERE author_id=? AND text LIKE '%рефлексирует%'", params: [worker] })).length).toBe(1);
+  // same stars + comment → no second message; changed → message again
+  expect((await human(() => ctx.fns.team.rate({ taskId: t1, stars: 3, comment: 'мало тестов' }))).reflect).toMatchObject({ status: 'duplicate' });
+  expect(notifications.length).toBe(before + 1);
+  expect((await human(() => ctx.fns.team.rate({ taskId: t1, stars: 4, comment: 'мало тестов' }))).reflect).toMatchObject({ status: 'sent' });
+  expect(notifications.length).toBe(before + 2);
+  // the session writes a memo → reflectFinish posts the diff and marks the feedback reflected
+  const inboxId = (r.reflect as any).inboxId;
+  expect((await runtime.reflectFinish(ctx, null, { inboxId })).status).toBe('waiting');
+  await query({ sql: "INSERT INTO team.persona_rev(id, persona_name, field, author_kind, author_id, path, summary, at) VALUES (?, ?, 'memo', 'agent', ?, 'user/feedback.md', 'мемо user/feedback.md: + больше тестов', ?)", params: [crypto.randomUUID(), pname, worker, Date.now() + 1] });
+  const fin = await runtime.reflectFinish(ctx, null, { inboxId });
+  expect(fin.status).toBe('reflected'); expect(fin.summary).toContain('user/feedback.md');
+  expect((await query({ sql: 'SELECT status FROM team.feedback_inbox WHERE id=?', params: [inboxId] }))[0].status).toBe('reflected');
+  // session archived → the next rating waits in the queue and the next brief lists it first
+  await query({ sql: 'UPDATE agents SET archived_at=? WHERE id=?', params: [Date.now(), worker] });
+  const t2 = `${f.id}-r2`; await done(t2);
+  const q = await human(() => ctx.fns.team.rate({ taskId: t2, stars: 2, comment: 'не тот экран' }));
+  expect(q.reflect).toMatchObject({ status: 'queued', to: null });
+  expect(notifications.length).toBe(before + 2);
+  // brief reads SKILL.md next to its file: load it with import.meta.dir pointing at the plugin source
+  const src = (await Bun.file(join(root, 'brief.ts')).text()).replaceAll('import.meta.dir', JSON.stringify(root));
+  runtime.brief = (await import(`data:text/javascript;base64,${Buffer.from(new Bun.Transpiler({ loader: 'ts', target: 'bun' }).transformSync(src)).toString('base64')}`)).default;
+  runtime.feed = async () => ({ working: [], entries: [], cursor: '' });
+  ctx.fns.plugins = { readSkill: async () => ({ text: '' }) };
+  const brief = await human(() => ctx.fns.team.brief({ persona: pname }));
+  expect(brief).toContain('Непрочитанные отзывы владельца (1)'); expect(brief).toContain('★2'); expect(brief).toContain('не тот экран');
+  expect((await query({ sql: 'SELECT status FROM team.feedback_inbox WHERE task_id=?', params: [t2] }))[0].status).toBe('briefed');
+});
+
+const hostSetup = async () => {
+  await query({ sql: "CREATE TABLE IF NOT EXISTS agents (id text PRIMARY KEY, parent_id text, archived_at bigint, run_state text, scratchpad jsonb, meta jsonb, created_at bigint)" });
+  await query({ sql: "CREATE TABLE IF NOT EXISTS cron_tasks (name text PRIMARY KEY, fn text, args jsonb, enabled boolean DEFAULT true)" });
+  const raw = { fns: { procs: { db: { exec: ({ sql: text }: any) => sql.unsafe(text) } } } };
+  for (const k of Object.keys(runtime).filter(k => k.startsWith('$migration_') && k > '$migration_20291020000100_team_queue').sort()) await runtime[k].up(raw);
+  ctx.fns.cron.add = async (o: any) => { await query({ sql: 'INSERT INTO cron_tasks(name, fn, args) VALUES (?, ?, ?::jsonb) ON CONFLICT (name) DO UPDATE SET args = EXCLUDED.args, enabled = true', params: [o.name, o.fn, JSON.stringify(o.args)] }); return o; };
+  const wakes: any[] = [];
+  ctx.fns.jobs = { canSee: async () => true };
+  ctx.fns.agent.wake = async (o: any) => { wakes.push(o); return { ok: true }; };
+  ctx.fns.session.archive = async ({ id }: any) => { await query({ sql: 'UPDATE agents SET archived_at=? WHERE id=?', params: [Date.now(), id] }); return { ok: true }; };
+  return wakes;
+};
+const personaFixture = async (prefix: string) => {
+  const f = await fixture(); const worker = f.roster[1];
+  const now = Date.now(); const pname = `${prefix}-${f.id}`;
+  await query({ sql: "INSERT INTO agents(id, run_state, created_at) VALUES (?, 'idle', ?)", params: [worker, now] });
+  await query({ sql: "INSERT INTO team.persona(name, owner_user_id, current_agent_id, created_at, updated_at) VALUES (?, 'owner', ?, ?, ?)", params: [pname, worker, now, now] });
+  await query({ sql: 'INSERT INTO team.persona_session(agent_id, persona_name, team_id, started_at) VALUES (?, ?, ?, ?)', params: [worker, pname, f.id, now] });
+  const submit = async (taskId: string) => {
+    const tr = (transition: any, version: number) => member(worker, () => f.command({ action: 'taskTransition', taskId, transition }, version));
+    const v = Number((await query({ sql: 'SELECT version FROM team.task WHERE id=?', params: [taskId] }))[0].version);
+    const st = (await query({ sql: 'SELECT status FROM team.task WHERE id=?', params: [taskId] }))[0].status;
+    let n = v; if (st === 'assigned') { await tr({ action: 'start' }, n); n++; }
+    await tr({ action: 'submit', summary: 'Done', artifacts: [], verification: 'bun test', report: { summary: 'ok' } }, n);
+  };
+  return { f, worker, pname, submit };
+};
+const status = async (taskId: string) => (await query({ sql: 'SELECT status FROM team.task WHERE id=?', params: [taskId] }))[0].status;
+
+test('rate without a rework request → one message; persona reflects → team.close → done + archive; chronicle: оценка → рефлексирует → закрыла → в архиве', async () => {
+  const wakes = await hostSetup();
+  const { f, worker, pname, submit } = await personaFixture('Даша');
+  const t1 = `${f.id}-a1`; await f.add(t1); await submit(t1);
+  // close before any rating → error
+  await expect(member(worker, () => ctx.fns.team.close({ taskId: t1 }))).rejects.toThrow(/Нет оценки/);
+  const notesBefore = notifications.length;
+  const r = await human(() => ctx.fns.team.rate({ taskId: t1, stars: 4, comment: 'хорошо, но описания короче' }));
+  // the owner only rated: the task is still in review, one message to the executor
+  expect(r.closed).toBe(false); expect(await status(t1)).toBe('review');
+  expect(r.reflect).toMatchObject({ status: 'sent', to: worker });
+  expect(notifications.length).toBe(notesBefore + 1);
+  const msg = notifications.at(-1);
+  expect(msg.to).toBe(worker); expect(msg.text).toContain('★4'); expect(msg.text).toContain('описания короче'); expect(msg.text).toContain('team.close'); expect(msg.text).toContain('team.rework');
+  // the owner cannot close; another agent cannot close
+  await expect(human(() => ctx.fns.team.close({ taskId: t1 }))).rejects.toThrow(/исполнитель/);
+  await expect(member(f.roster[2], () => ctx.fns.team.close({ taskId: t1 }))).rejects.toThrow(/исполнитель/);
+  // the persona reflects (memo) then closes
+  await query({ sql: "INSERT INTO team.persona_rev(id, persona_name, field, author_kind, author_id, path, summary, at) VALUES (?, ?, 'memo', 'agent', ?, 'user/feedback.md', 'мемо user/feedback.md: + короче описания', ?)", params: [crypto.randomUUID(), pname, worker, Date.now() + 1] });
+  const inboxId = (r.reflect as any).inboxId;
+  expect((await runtime.reflectFinish(ctx, null, { inboxId })).status).toBe('reflected');
+  const c = await member(worker, () => ctx.fns.team.close({ taskId: t1 }));
+  expect(c).toMatchObject({ status: 'closed', stars: 4, last: true });
+  expect(await status(t1)).toBe('done');
+  expect((await query({ sql: "SELECT accepted_by FROM team.accept WHERE agent_id='' AND task_id=?", params: [t1] }))[0].accepted_by).toBe('owner');
+  // quiet retire: no extra turn, archived as soon as idle
+  expect(wakes.filter(w => w.id === worker).length).toBe(0);
+  expect((await query({ sql: "SELECT args FROM cron_tasks WHERE name=?", params: ['team-retire:' + worker] }))[0].args.quiet).toBe(true);
+  const fin = await runtime.retireFinish(ctx, null, { agentId: worker });
+  expect(fin.status).toBe('archived');
+  expect((await query({ sql: 'SELECT archived_at FROM agents WHERE id=?', params: [worker] }))[0].archived_at).not.toBeNull();
+  const posts = (await query({ sql: 'SELECT text FROM team.post WHERE author_id=? ORDER BY created_at, id', params: [worker] })).map((x: any) => x.text);
+  expect(posts.some((x: string) => x.includes('рефлексирует по оценке ★4'))).toBe(true);
+  expect(posts.some((x: string) => x.includes('вывод по оценке ★4') && x.includes('user/feedback.md'))).toBe(true);
+  expect(posts.some((x: string) => x.includes(pname + ' закрыла задачу') && x.includes('★4'))).toBe(true);
+  expect(posts.some((x: string) => x.includes('в архиве'))).toBe(true);
+  // re-rating the closed task: stars updated, session archived → queued for the brief, nothing to close
+  const again = await human(() => ctx.fns.team.rate({ taskId: t1, stars: 5 }));
+  expect(again.closed).toBe(false); expect(again.reflect).toMatchObject({ status: 'queued' });
+  expect((await query({ sql: "SELECT stars FROM team.rating WHERE agent_id='' AND task_id=?", params: [t1] }))[0].stars).toBe(5);
+});
+
+test('rate asking for rework → team.rework → task back in work, same live session; resubmit needs a fresh rating to close', async () => {
+  const wakes = await hostSetup();
+  const { f, worker, pname, submit } = await personaFixture('Рework');
+  const t1 = `${f.id}-w1`; await f.add(t1); await submit(t1);
+  await human(() => ctx.fns.team.rate({ taskId: t1, stars: 2, comment: 'доделай тесты на пустой ввод' }));
+  const w = await member(worker, () => ctx.fns.team.rework({ taskId: t1 }));
+  expect(w).toMatchObject({ status: 'rework', comment: 'доделай тесты на пустой ввод' });
+  expect(await status(t1)).toBe('assigned');
+  expect((await query({ sql: 'SELECT archived_at FROM agents WHERE id=?', params: [worker] }))[0].archived_at).toBeNull();
+  expect((await query({ sql: "SELECT 1 FROM cron_tasks WHERE name=?", params: ['team-retire:' + worker] })).length).toBe(0);
+  expect((await query({ sql: "SELECT 1 FROM team.post WHERE author_id=? AND text LIKE ?", params: [worker, pname + ' доделывает по комментарию%'] })).length).toBe(1);
+  // resubmitted: the old rating predates the new hand-in → close refused until the owner rates again
+  await submit(t1);
+  await expect(member(worker, () => ctx.fns.team.close({ taskId: t1 }))).rejects.toThrow(/Нет оценки/);
+  await Bun.sleep(5);
+  await human(() => ctx.fns.team.rate({ taskId: t1, stars: 5, comment: 'отлично' }));
+  expect((await member(worker, () => ctx.fns.team.close({ taskId: t1 }))).status).toBe('closed');
+  expect(await status(t1)).toBe('done');
+  expect(wakes.length).toBe(0);
+});
+
+test('rate of an archived session’s open task → closed at once, feedback queued for the brief; manager accept unchanged; person accept needs stars', async () => {
+  await hostSetup();
+  const { f, worker, submit } = await personaFixture('Архив');
+  const sup = f.roster[0];
+  const t1 = `${f.id}-z1`, t2 = `${f.id}-z2`; await f.add(t1); await submit(t1);
+  // manager first pass: mark manager:<sup>, task stays in review
+  const m = await member(sup, () => ctx.fns.team.accept({ taskId: t1 }));
+  expect(m).toMatchObject({ final: false, by: 'manager:' + sup });
+  expect(await status(t1)).toBe('review');
+  // a person's accept without stars is refused: the owner rates
+  await expect(human(() => ctx.fns.team.accept({ taskId: t1 }))).rejects.toThrow(/stars/);
+  // session archived → nobody would close it: rate closes on the owner's behalf and queues the feedback
+  await query({ sql: 'UPDATE agents SET archived_at=? WHERE id=?', params: [Date.now(), worker] });
+  const r = await human(() => ctx.fns.team.accept({ taskId: t1, stars: 3, comment: 'нормально' }));
+  expect(r).toMatchObject({ final: true, rating: { stars: 3 } });
+  expect(r.reflect).toMatchObject({ status: 'queued' });
+  expect(await status(t1)).toBe('done');
+  expect((await query({ sql: "SELECT accepted_by FROM team.accept WHERE agent_id='' AND task_id=?", params: [t1] }))[0].accepted_by).toBe('owner');
+  // not a persona session (no persona row for this assignee): also closed at once
+  const g = await fixture(); const plain = g.roster[1];
+  await g.add(t2.replace(f.id, g.id));
+  const t3 = t2.replace(f.id, g.id);
+  const tr = (transition: any, version: number) => member(plain, () => g.command({ action: 'taskTransition', taskId: t3, transition }, version));
+  await tr({ action: 'start' }, 1); await tr({ action: 'submit', summary: 'Done', artifacts: [], verification: 'x', report: { summary: 'ok' } }, 2);
+  const q = await human(() => ctx.fns.team.rate({ taskId: t3, stars: 4 }));
+  expect(q.closed).toBe(true); expect(await status(t3)).toBe('done');
+});

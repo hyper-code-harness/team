@@ -1,5 +1,5 @@
-/** Accept the owner's (CSRF-checked) "Принять" form from team.taskView: on success empty the app popup body (popup.js then closes it) with a toast; on failure answer with the refreshed card and the error.
- * @param opts.req Authenticated same-origin form request with taskId, optional agentId and optional stars 1–5 (saved with team.rate right after the accept: accept + rate in one action).
+/** Legacy route of the old «Принять» form (the popup now posts stars to /team/rate). Compatible: the owner's (CSRF-checked) accept requires stars — team.accept → team.rate (the executor then closes or reworks): on success empty the app popup body (popup.js then closes it) with a toast; on failure answer with the refreshed card and the error.
+ * @param opts.req Authenticated same-origin form request with taskId, optional agentId, stars 1–5 (required) and optional comment.
  */
 export default async function(ctx:Context,session:Session|null,opts:{req:Request}):Promise<Response> {
  const req=opts.req;
@@ -14,13 +14,8 @@ export default async function(ctx:Context,session:Session|null,opts:{req:Request
  const taskId=get('taskId'), agentId=get('agentId');
  if(!taskId) return new Response('taskId required',{status:400});
  const close=(message:string)=>{const r=ctx.fns.w.respond({toast:{message}});const h=new Headers(r.headers);h.set('HX-Retarget','#app-popup-body');h.set('HX-Reswap','innerHTML');return new Response('',{status:200,headers:h});};
- let notice='';
- const stars=Number(get('stars')||0);
- if(stars&&(!Number.isInteger(stars)||stars<1||stars>5)) return new Response('stars must be 1–5',{status:400});
- try { await ctx.fns.team.accept({taskId,...(agentId?{agentId}:{})}); }
+ const stars=Number(get('stars')||0), comment=get('text')||get('comment');
+ if(!stars) return html(await ctx.fns.team.taskView({taskId,...(agentId?{agentId}:{}),notice:'Поставьте оценку.'}));
+ try { const r=await ctx.fns.team.accept({taskId,stars,...(comment?{comment}:{}),...(agentId?{agentId}:{})}); return close('Оценка ★'+stars+' отправлена'+(r.final?': задача закрыта.':' — исполнитель сам закроет задачу или доделает.')); }
  catch(error) { return html(await ctx.fns.team.taskView({taskId,...(agentId?{agentId}:{}),notice:'Не принято: '+(error instanceof Error?error.message:String(error))})); }
- // accept + rate in one action: the stars of the «Принять» form are saved right after the final accept
- try { if(stars) await ctx.fns.team.rate({taskId,stars,...(agentId?{agentId}:{})}); return close('Принято'+(stars?' с оценкой ★'+stars:'')+': задача ушла в историю.'); }
- catch(error) { notice='Принято, но оценка не сохранилась: '+(error instanceof Error?error.message:String(error)); }
- return html(await ctx.fns.team.taskView({taskId,...(agentId?{agentId}:{}),notice}));
 }

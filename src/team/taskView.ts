@@ -1,7 +1,7 @@
 /**
  * Renders one task as a full card: status, assignee face, report, brief, history and a feedback form
  *
- * Read-only @view page of a single task. Without agentId it is a team.task row (access via team.get, report from the latest submit event); with agentId it is a plan task of that delegated child (report from plan task .report or result). Shows, top to bottom: title, coloured status, assignee; the brief (human part before "---", agent details folded); "Что сделано" (short summary before "---", visuals grid with a large view on click, a one-line checks note, «Не сделано» and «Дальше» items with «Вернуть в работу»/«В бэклог» buttons posting to /team/next); folded "Подробный отчёт" (rest of summary, steps, decisions, full checks, notCovered, files, raw result); folded history; and last a decision bar sticky at the bottom: 1–5 star rating posting to /team/rate, a comment with «Не согласен» (secondary) posting to /team/feedback and «Принять» (primary, right) posting to /team/accept. Opened full-screen in the app popup by team.taskPopup.
+ * Read-only @view page of a single task. Without agentId it is a team.task row (access via team.get, report from the latest submit event); with agentId it is a plan task of that delegated child (report from plan task .report or result). Shows, top to bottom: title, coloured status, assignee; the brief (human part before "---", agent details folded); "Что сделано" (short summary before "---", visuals grid with a large view on click, a one-line checks note, «Не сделано» and «Дальше» items with «Вернуть в работу»/«В бэклог» buttons posting to /team/next); folded "Подробный отчёт" (rest of summary, steps, decisions, full checks, notCovered, files, raw result); folded history; and last a decision bar sticky at the bottom. In review and done it is one form posting to /team/rate: «Оценка» 1–5 stars, a comment and «Отправить» (disabled-looking until a star is chosen) — the owner only rates; the executor reads it and closes the task itself (team.close) or reworks it (team.rework). Other statuses: a comment posting to /team/feedback. Opened full-screen in the app popup by team.taskPopup.
  * @view
  * @live team
  * @param opts.taskId Team task id, or plan task id when agentId is given.
@@ -138,10 +138,18 @@ export default async function (
             : ` · <span class="am" title="${esc('Принял менеджер ' + nameOf(acceptedByManager) + accWhen + '. Ваше решение главнее: комментарий вернёт задачу в работу.')}"><span class="fc">${face(acceptedByManager, 'sm')}</span>принял ${esc(nameOf(acceptedByManager))}</span>`;
         // Head line (face + name + short title): the app popup moves it into its own header (<template data-popup-head>,
         // ui/$script_popup.js) and hides the inline copy; outside the popup (canvas) the inline copy is the title.
-        const headLine = `<span class="tv-head">${ownerHead}<span class="tv-tt" title="${esc(title)}">${esc(shortTitle)}</span></span>`;
-        const headStyle = '<style>.tv-head{display:flex;align-items:center;gap:6px;min-width:0}.tv-head .tv-ow{flex:none;display:inline-flex;align-items:center;gap:6px;color:var(--w-ink,inherit)}.tv-head .tv-ow>.w-chat-icon{display:inline-flex;align-self:center}.tv-head .tv-ow b{font-weight:600;line-height:1}.tv-head .tv-pf{cursor:pointer;border-radius:999px;padding:1px 6px 1px 1px}.tv-head .tv-pf:hover{background:var(--w-surface-hover,rgb(0 0 0 / .06))}.tv-head .tv-tt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;color:var(--w-ink,inherit)}.tv-head .tv-mu{color:var(--w-ink-faint,inherit)}#app-popup-body .tview .hd .tv-head{display:none}</style>';
+        // Meta (status chip, manager check, role, session id) sits in the same head line, right of the title: small and grey,
+        // never wraps into a column — the title is ellipsised first; at <=700px the meta drops under the title, still in the head.
         const meta = [st + accMark, role ? esc(role) : '', ownerId ? `<code>${esc(ownerId)}</code>` : ''].filter(Boolean).join(' · ');
-        const header = `<template data-popup-head>${headStyle}${headLine}</template>${headStyle}<header class="hd"><div class="tt">${headLine}<p class="dl">${meta}</p></div></header>`;
+        const headLine = `<span class="tv-head">${ownerHead}<span class="tv-tt" title="${esc(title)}">${esc(shortTitle)}</span>${meta ? `<span class="tv-meta">${meta}</span>` : ''}</span>`;
+        const headStyle = '<style>.tv-head{display:flex;align-items:center;gap:6px;min-width:0}.tv-head .tv-ow{flex:none;display:inline-flex;align-items:center;gap:6px;color:var(--w-ink,inherit)}.tv-head .tv-ow>.w-chat-icon{display:inline-flex;align-self:center}.tv-head .tv-ow b{font-weight:600;line-height:1}.tv-head .tv-pf{cursor:pointer;border-radius:999px;padding:1px 6px 1px 1px}.tv-head .tv-pf:hover{background:var(--w-surface-hover,rgb(0 0 0 / .06))}.tv-head .tv-tt{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;color:var(--w-ink,inherit)}.tv-head .tv-mu{color:var(--w-ink-faint,inherit)}'
+            + '.tv-head .tv-meta{flex:none;display:inline-flex;align-items:center;gap:4px;margin-left:6px;white-space:nowrap;font-size:var(--w-text-small,12px);font-weight:400;line-height:var(--w-line-small,16px);color:var(--w-ink-faint,#888)}.tv-head .tv-meta code{font-size:inherit;color:inherit}'
+            + '.tv-head .st{color:var(--w-ink-muted)}.tv-head .st .gl{margin-right:2px;color:var(--w-ink-faint)}.tv-head .st.s-working .gl,.tv-head .st.s-active .gl,.tv-head .st.s-review .gl{color:var(--w-live)}.tv-head .st.s-review{color:var(--w-ink)}.tv-head .st.s-done .gl{color:var(--w-ink-muted)}.tv-head .st.s-blocked{color:var(--w-danger)}'
+            + '.tv-head .mck{position:relative;display:inline-flex;width:16px;height:16px;flex:none}.tv-head .mck>*{pointer-events:none}.tv-head .mck>:first-child{width:16px;height:16px;border-radius:999px;overflow:hidden}.tv-head .mck svg,.tv-head .mck img{width:16px;height:16px}.tv-head .mck i{position:absolute;right:-3px;bottom:-3px;width:9px;height:9px;border-radius:999px;background:var(--w-success,#1f9d55);color:#fff;font:700 7px/9px var(--w-font,sans-serif);font-style:normal;text-align:center;box-shadow:0 0 0 1.5px var(--w-surface-document,#fff)}'
+            + '.tv-head .am{display:inline-flex;align-items:center;gap:4px;color:var(--w-success,var(--w-ink-muted))}.tv-head .am .fc{display:inline-flex}.tv-head .am .fc>*{width:16px;height:16px}'
+            + '@media (max-width:700px){.tv-head{flex-wrap:wrap;row-gap:2px}.tv-head .tv-tt{flex:1 1 0}.tv-head .tv-meta{flex:1 0 100%;margin-left:0;flex-wrap:wrap;white-space:normal}}'
+            + '#app-popup-body .tview>.hd{display:none}#app-popup-body .tview>.hd+.sc{padding-top:0}.tview>.hd+.sc{border-top:0}</style>';
+        const header = `<template data-popup-head>${headStyle}${headLine}</template>${headStyle}<header class="hd">${headLine}</header>`;
     
         // ---- report
         const listOf = (items: unknown[], render: (x: any) => string) => items.length ? `<ul class="wx-stack wx-gap-s1">${items.map(x => `<li>${render(x)}</li>`).join('')}</ul>` : '';
@@ -288,33 +296,38 @@ export default async function (
         const kindTone: Record<string, types.w.Tone> = { approve: 'success', done: 'success', result: 'success', changes: 'warning', block: 'danger', feedback: 'warning', preempt: 'danger', rating: 'success', next: 'info', reopen: 'warning' };
         const hist = history.length ? '<ul class="tl">' + history.slice().reverse().map(h => `<li class="${kindTone[h.kind] ? 't-' + kindTone[h.kind] : ''}"><time>${esc(new Date(h.ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</time><p><b>${esc(nameOf(h.actor, h.actorKind))}</b> ${h.kind === 'rating' ? `<span class="rt">${esc(h.text.split(' — ')[0])}</span>` : esc(h.kind)}${h.kind === 'rating' ? (h.text.includes(' — ') ? ' — ' + esc(h.text.split(' — ').slice(1).join(' — ')) : '') : ''}${h.kind !== 'rating' && h.text && h.text !== h.kind ? ' — ' + esc(h.text.length > 600 ? h.text.slice(0, 600) + '…' : h.text) : ''}</p></li>`).join('') + '</ul>' : '<p class="mu">Событий пока нет.</p>';
     
-        // ---- feedback form
-    // one compact decision bar: [★★★★★] [Комментарий… → textarea on focus] [Вернуть в работу] [Принять]; off review: [★] [Комментарий…] [Отправить]
-    // review/done: the comment returns the task to work (team.reopen via /team/reopen, comment required); otherwise it is a plain comment to the assignee (/team/feedback)
+        // ---- decision bar
+        // review/done: ONE form posting to /team/rate — [Оценка ★★★★★] [Комментарий…] [Отправить]. The owner only rates:
+        // the executor reads stars + comment in one message and itself closes the task (team.close) or reworks it (team.rework).
+        // «Отправить» looks disabled until a star is chosen (CSS :has); the route answers «поставьте оценку» anyway.
+        // Other statuses: a plain comment to the assignee (/team/feedback).
         const review = status === 'review';
         const returnable = review || status === 'done';
-        const fb = w.form({ form: returnable ? 'team-task-reopen' : 'team-task-feedback', post: returnable ? '/team/reopen' : '/team/feedback', target: '#' + root, swap: 'outerHTML', layout: 'row', vals: { taskId, ...(agentId ? { agentId } : {}) },
-            body: csrf + w.textarea({ name: 'text', label: 'Комментарий', placeholder: returnable ? 'Что не так и что доделать… (исполнитель продолжит ту же задачу)' : 'Комментарий…', rows: 1, required: true, maxlength: 8000 })
-                + (returnable
-                    ? w.button({ label: 'Вернуть в работу', icon: 'arrow-u-up-left', size: 'sm', submit: true, marks: { action: 'team-reopen' }, title: 'Исполнитель получит комментарий и продолжит эту же задачу' })
-                    : w.button({ label: 'Отправить', icon: 'paper-plane-right', tone: 'primary', size: 'sm', submit: true })) });
-        // rating 1–5 stars (team.rate). In review the stars sit inside the «Принять» form: accept + rate in one action
-        // (/team/accept rates after accepting). After that a click on a star submits at once (hx-trigger change).
         const cur = rating ? Number(rating.stars) : 0;
-        const starInputs = (pfx: string) => [5, 4, 3, 2, 1].map(n => `<input type="radio" name="stars" value="${n}" id="${esc(root)}-${pfx}${n}"${n === cur ? ' checked' : ''}><label for="${esc(root)}-${pfx}${n}" title="Оценить: ${n} из 5">★</label>`).join('');
-        const acceptForm = review ? w.form({ form: 'team-task-accept', post: '/team/accept', target: '#' + root, swap: 'outerHTML', layout: 'row', vals: { taskId, ...(agentId ? { agentId } : {}) },
-            body: csrf + `<span class="stars" role="radiogroup" aria-label="Оценка (необязательно) — сохранится вместе с «Принять»">${starInputs('sa')}</span>` + w.button({ label: cur ? 'Принять' : 'Принять и оценить', icon: 'check', tone: 'primary', size: 'sm', submit: true }) }) : '';
-        const starInputs1 = starInputs('st');
-        const rateForm = status === 'done' ? w.form({ form: 'team-task-rate', post: '/team/rate', target: '#' + root, swap: 'outerHTML', layout: 'row', trigger: 'change', vals,
-            body: csrf + `<span class="stars" role="radiogroup" aria-label="${cur ? 'Оценка ★' + cur + ' — нажмите, чтобы изменить' : 'Оценка'}">${starInputs1}</span>` }) : '';
+        const starInputs = [5, 4, 3, 2, 1].map(n => `<input type="radio" name="stars" value="${n}" id="${esc(root)}-st${n}"${n === cur ? ' checked' : ''}><label for="${esc(root)}-st${n}" title="Оценка: ${n} из 5">★</label>`).join('');
+        // Both forms wear the chat composer (w-composer classes from the w kit): a full-width footer with a hairline that turns
+        // into the accent line on focus, an auto-growing text, and a toolbar under it — stars on the left, the round send arrow
+        // on the right. Keys as in chat: Enter sends, Shift+Enter is a new line (CMP_KEYS below).
+        const sendBtn = (title: string, action?: string) => `<button type="submit" class="w-send"${action ? ` data-action="${action}"` : ''} title="${esc(title)} · Enter" aria-label="Отправить">${w.icon({ name: 'arrow-up', size: 14 })}</button>`;
+        const composer = (placeholder: string, tools: string, send: string, required: boolean) =>
+            `<div class="w-composer tv-cmp"><div class="w-composer-box"><textarea name="text" rows="1" aria-label="Комментарий" placeholder="${esc(placeholder)}" maxlength="8000"${required ? ' required' : ''} title="Enter — отправить · Shift+Enter — новая строка"></textarea>`
+            + `<div class="w-composer-bar"><span class="w-composer-tools">${tools}</span><span class="w-composer-send">${send}</span></div></div></div>`;
+        const fb = returnable
+            ? w.form({ form: 'team-task-review', post: '/team/rate', target: '#' + root, swap: 'outerHTML', layout: 'stack', vals,
+                body: csrf + composer('Комментарий: что хорошо, что доделать…',
+                    `<span class="stw"><span class="stars" role="radiogroup" aria-label="Оценка">${starInputs}</span></span>`,
+                    sendBtn('Отправить оценку и комментарий исполнителю: он сам закроет задачу или доделает', 'team-rate'), false) })
+            : w.form({ form: 'team-task-feedback', post: '/team/feedback', target: '#' + root, swap: 'outerHTML', layout: 'stack', vals,
+                body: csrf + composer('Комментарий…', '', sendBtn('Отправить комментарий исполнителю'), true) });
         // sticky at the bottom so it stays visible over a long report
-        const actions = `${opts.notice ? `<p class="ab-n" role="status">${esc(opts.notice)}</p>` : ''}<div class="team-task-actions ab">${rateForm}${fb}${acceptForm}</div>`;
+        const actions = `${opts.notice ? `<p class="ab-n" role="status">${esc(opts.notice)}</p>` : ''}<div class="team-task-actions ab">${fb}</div>${CMP_KEYS}`;
         const history2 = fold(`История (${history.length})`, hist);
         const main = header + brief + doneHtml + detailHtml + history2 + '<div class="sp"></div>' + actions;
         return `<div id="${esc(root)}" class="team-task-view tview" data-entity="team-task" data-id="${esc(taskId)}" data-status="${esc(status)}">${STYLE}${main}</div>`;
 }
 
 // same look as the board (team.dashboard .tdash): --w-* tokens, grey secondary text, one blue accent, thin rules instead of bordered cards
+const CMP_KEYS = `<script>(function(){if(window.__tvCmp)return;window.__tvCmp=1;document.addEventListener('keydown',function(e){var t=e.target;if(e.key!=='Enter'||e.shiftKey||e.isComposing||e.key==='Process'||!t||!t.closest||!t.closest('.tview .tv-cmp')||t.tagName!=='TEXTAREA')return;e.preventDefault();var f=t.form;if(!f)return;if(f.matches('[data-form="team-task-review"]')&&!f.querySelector('input[name=stars]:checked'))return;if(f.matches('[data-form="team-task-feedback"]')&&!t.value.trim())return;f.requestSubmit()},true)})()</script>`;
 const STYLE = `<style>
 .tview{box-sizing:border-box;display:flex;flex-direction:column;min-height:100%;padding:var(--w-s6);background:var(--w-surface-document);color:var(--w-ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:var(--w-text-ui);line-height:var(--w-line-ui)}
 .tview .lk{all:unset;cursor:pointer;color:var(--w-accent,#2563eb);text-decoration:underline}.tview .hd{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--w-s6);padding-bottom:var(--w-s4)}
@@ -330,13 +343,13 @@ const STYLE = `<style>
 .tview .ow b{display:block;font-weight:500;color:var(--w-ink)}.tview .ow small{display:block;font-size:var(--w-text-small);color:var(--w-ink-faint)}
 .tview>*{flex:none;min-width:0}.tview>.sp{flex:1 0 0}
 .tview .ab{position:sticky;bottom:0;z-index:10;display:flex;align-items:flex-end;gap:var(--w-s3);min-height:52px;box-sizing:border-box;margin:var(--w-s4) calc(-1 * var(--w-s6)) calc(-1 * var(--w-s6));padding:10px var(--w-s6);background:var(--w-surface-document);border-top:var(--w-rule)}
-.tview .ab form{margin:0;gap:var(--w-s2);align-items:flex-end;flex:none}
-.tview .ab form[data-form="team-task-rate"]{align-self:center}
-.tview .ab{flex-wrap:wrap}.tview .ab form[data-form="team-task-feedback"],.tview .ab form[data-form="team-task-reopen"]{flex:1 1 20rem;min-width:0}
-.tview .ab textarea{flex:1;min-width:0;height:var(--w-control-sm);min-height:0;max-height:var(--w-height-textarea);padding:3px var(--w-s2);line-height:20px;resize:none;field-sizing:fixed;overflow:hidden}
-.tview .ab textarea:focus,.tview .ab textarea:not(:placeholder-shown){height:auto;min-height:calc(4 * 20px + 10px);field-sizing:content;overflow:auto}
+.tview .ab form{margin:0;flex:1 1 auto;min-width:0;gap:0}
+.tview .ab:has(.tv-cmp){padding:0;border-top:0;background:none}
+.tview .tv-cmp{width:100%;background:var(--w-surface-chrome)}.tview .tv-cmp .w-composer-box{max-width:none;padding:var(--w-s2) var(--w-s6) var(--w-s3)}
+.tview .tv-cmp textarea{padding:var(--w-s1) 0 var(--w-s2);max-height:min(40vh,var(--w-height-textarea))}
+.tview .tv-cmp .w-composer-tools{gap:var(--w-s2)}.tview .tv-cmp .stw{display:inline-flex;align-items:center;margin-left:-1px}
+.tview form[data-form="team-task-review"]:not(:has(input[name=stars]:checked)) [data-action="team-rate"]{opacity:.35;pointer-events:none}
 .tview .ab-n{margin:var(--w-s4) 0 0;font-size:var(--w-text-small);color:var(--w-danger)}
-@container (max-width:30rem){.tview .ab{flex-wrap:wrap}.tview .ab form[data-form="team-task-feedback"],.tview .ab form[data-form="team-task-reopen"]{flex-basis:100%;order:3}}
 .tview .sc{padding:var(--w-s4) 0;border-top:var(--w-rule)}
 .tview h3{margin:0;padding-bottom:var(--w-s2);font-size:var(--w-text-small);font-weight:500;line-height:var(--w-line-small);text-transform:uppercase;letter-spacing:var(--w-caps-spacing);color:var(--w-ink-faint)}
 .tview .sc .sc{padding:var(--w-s2) 0;border-top:0}

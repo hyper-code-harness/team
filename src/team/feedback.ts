@@ -1,7 +1,7 @@
 /**
  * Sends the owner's comment on a task to its assignee and returns handed-in work for rework
  *
- * Owner (signed-in person) only. Team task: in review it records changes (reason = comment) so the task goes back to assigned and the assignee is notified; otherwise a say to the assignee in the task thread. Delegated child task (agentId): a notification from the person into the child chat via session.enqueueNotification, or to its manager (parent) when the child is archived; the comment is also kept on the plan task as feedback[]. Visible in the team timeline / chat feed.
+ * Owner (signed-in person) only. Team task: in review it records changes (reason = comment) so the task goes back to assigned and the assignee is notified; otherwise a say to the assignee in the task thread. Delegated child task (agentId): a notification from the person into the child chat via session.enqueueNotification, or to its manager (parent) when the child is archived; the comment is also kept on the plan task as feedback[]. Visible in the team timeline / chat feed. A comment on a finished (done) team task, or on a done task of an archived child (a live child already gets the comment itself), also goes to team.reflect, so the executor persona draws conclusions into its memory (review → rework instead).
  * @param opts.taskId Team task id, or plan task id when agentId is given.
  * @param opts.agentId Delegated child whose plan holds the task.
  * @param opts.text Comment text, up to 8000 characters.
@@ -47,8 +47,10 @@ export default async function (
                 if (task) { task.feedback = Array.isArray(task.feedback) ? task.feedback : []; task.feedback.push({ at: Date.now(), by: actor.id, text, to }); task.feedback = task.feedback.slice(-50); }
                 return null;
             } });
+            let reflect: unknown = null;
+            if (t.status === 'done' && archived) { try { reflect = await ctx.fns.team.reflect({ kind: 'comment', taskId, agentId, assigneeAgentId: agentId, title: String(t.title ?? taskId), comment: text }); } catch (e) { reflect = { error: String((e as Error)?.message ?? e).slice(0, 200) }; } }
             try { await ctx.fns.procs.events.refresh({ topic: 'team' }); } catch {}
-            return { kind: 'child', delivered: archived ? 'manager' : 'agent', to, reopened: false, messageIdx: sent.messageIdx };
+            return { kind: 'child', reflect, delivered: archived ? 'manager' : 'agent', to, reopened: false, messageIdx: sent.messageIdx };
         }
         const found = await ctx.fns.procs.db.select({ sql: 'SELECT team_id FROM team.task WHERE id = ?', params: [taskId] }) as Row[];
         let team: any = null; let task: Row | undefined;
@@ -63,5 +65,7 @@ export default async function (
             return { kind: 'team', delivered: 'changes', to: assignee, reopened: true, eventId: out.eventId };
         }
         const out = await ctx.fns.team.executeCommand({ teamId, requestKey: key, expectedVersion: Number(team.team.version), command: { action: 'say', text: 'Комментарий владельца: ' + text, to: assignee, taskId } });
-        return { kind: 'team', delivered: 'say', to: assignee, reopened: false, eventId: out.eventId, ...(task.status === 'done' ? { note: 'done is terminal: reduceTask cannot reopen it; the comment is in the task thread' } : {}) };
+        let reflect: unknown = null;
+        if (task.status === 'done' && task.assignee_agent_id) { try { reflect = await ctx.fns.team.reflect({ kind: 'comment', taskId, assigneeAgentId: assignee, title: String(task.title ?? taskId), comment: text }); } catch (e) { reflect = { error: String((e as Error)?.message ?? e).slice(0, 200) }; } }
+        return { kind: 'team', reflect, delivered: 'say', to: assignee, reopened: false, eventId: out.eventId, ...(task.status === 'done' ? { note: 'done is terminal: reduceTask cannot reopen it; the comment is in the task thread' } : {}) };
 }

@@ -123,7 +123,17 @@ export default async function (
      case 'taskTransition': {
       if(!task) throw new Error('Task required');
       const slots=await ctx.fns.procs.db.select({sql:"SELECT id FROM team.task WHERE team_id=? AND assignee_agent_id=? AND status IN ('working','blocked') LIMIT 1",params:[opts.teamId,task.assigneeAgentId]});
-      task=await ctx.fns.team.reduceTask({task,command:c.transition,actorKind:actor.kind,actorId:actor.id,supervisorId:String(team.supervisor_agent_id),slotTaskId:slots[0]?.id??null,now,submissionId:eventId,progressWindowMs:Number(team.progress_window_ms),dependencyStatuses:await depStatuses(task)});
+      // team.close / team.rework: the assignee acts on the owner's rating of THIS submission — reviewer authority comes from that rating
+      let rk:'user'|'agent'=actor.kind as 'user'|'agent', rid=actor.id;
+      if((c.transition.action==='approve'||c.transition.action==='changes')&&c.transition.byOwnerRating) {
+       if(actor.kind!=='agent'||actor.id!==task.assigneeAgentId) throw new Error('Only the assignee acts on the owner rating');
+       const sub=(await ctx.fns.procs.db.select({sql:'SELECT timestamp FROM team.event WHERE id=?',params:[task.currentSubmissionId]}))[0];
+       const rt=(await ctx.fns.procs.db.select({sql:"SELECT rated_by,rated_at FROM team.rating WHERE agent_id='' AND task_id=?",params:[task.id]}))[0];
+       if(!rt||!sub||Number(rt.rated_at)<Number(sub.timestamp)) throw new Error('Нет оценки владельца после последней сдачи');
+       rk='user'; rid=String(rt.rated_by);
+       if(c.transition.action==='approve') await ctx.fns.procs.db.run({sql:"INSERT INTO team.accept(agent_id,task_id,accepted_by,accepted_at) VALUES('',?,?,?) ON CONFLICT(agent_id,task_id) DO UPDATE SET accepted_by=EXCLUDED.accepted_by,accepted_at=EXCLUDED.accepted_at",params:[task.id,rid,now]});
+      }
+      task=await ctx.fns.team.reduceTask({task,command:c.transition,actorKind:rk,actorId:rid,supervisorId:String(team.supervisor_agent_id),slotTaskId:slots[0]?.id??null,now,submissionId:eventId,progressWindowMs:Number(team.progress_window_ms),dependencyStatuses:await depStatuses(task)});
       kind=c.transition.action;
       text='summary' in c.transition?c.transition.summary:'reason' in c.transition&&c.transition.reason?c.transition.reason:'note' in c.transition?c.transition.note:c.transition.action;
       if(c.transition.action==='claim') recipients=[String(team.supervisor_agent_id)].filter(id=>id!==actor.id);

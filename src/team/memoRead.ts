@@ -1,7 +1,7 @@
 /**
  * Read one memo of a persona with its recent revisions
  *
- * Returns the memo (title, description, text, version) or null when it does not exist; a deleted memo comes back with deleted:true and empty text, its revisions still listed (restore one with team.memoSave revertOf). Anyone in the team may read; name defaults to the caller session's persona.
+ * Returns the memo (title, description, text, version) or null when it does not exist; a deleted memo comes back with deleted:true and empty text, its revisions still listed (restore one with team.memoSave revertOf). Anyone in the team may read, colleagues' memos too (writing stays with the persona and the owner); name defaults to the caller session's persona.
  * @param opts.name Persona name; default: the persona of the calling session.
  * @param opts.path Memo path, e.g. "code/board.md".
  * @param opts.revisions How many latest revisions to include. @default 10 @minimum 0 @maximum 100

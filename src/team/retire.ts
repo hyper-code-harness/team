@@ -1,9 +1,11 @@
 /**
  * Send a persona session into the archive after its last turn: update the persona memory first
  *
- * Use instead of session.archive for any session of a persona (team.fire, after the owner accepts the session's last task, when a new session replaces the old one). Finds the persona by agentId (team.persona_session or persona.current_agent_id). Not a persona, or already archived: archives at once (archived sessions are left alone). Persona: gives the session one last turn — «обнови персону: мемо памяти (team.memoSave, одна тема — одно мемо, ≤2500 символов) и промпт (team.personaSave field prompt)» — and registers a durable cron task team-retire:<agentId> that runs team.retireFinish every 15 s; retireFinish archives as soon as the session saved its persona and went idle, or at the timeout (default 180 s) without it. No polling inside this call: it returns right away with status 'waiting'. A repeated call while a retire is pending returns 'pending' and changes nothing.
+ * Use instead of session.archive for any session of a persona (team.fire, after the session closed its last task by the owner's rating — team.close with quiet, when a new session replaces the old one). Finds the persona by agentId (team.persona_session or persona.current_agent_id). Not a persona, or already archived: archives at once (archived sessions are left alone). Persona: gives the session one last turn — «обнови персону: мемо памяти (team.memoSave, одна тема — одно мемо, ≤2500 символов) и промпт (team.personaSave field prompt)» — and registers a durable cron task team-retire:<agentId> that runs team.retireFinish every 15 s; retireFinish archives as soon as the session saved its persona and went idle, or at the timeout (default 180 s) without it. With `feedback` (the owner's rating of the last task) the same single turn starts with «Оценка ★N, комментарий… — сделай вывод» and asks to record the conclusion (e.g. user/feedback.md) along with the rest; retireFinish then marks that feedback reflected and names the rating in the chronicle note. No polling inside this call: it returns right away with status 'waiting'. With `quiet` (team.close: the session already reflected) there is no last turn — retireFinish archives as soon as the session is idle. A repeated call while a retire is pending returns 'pending' and changes nothing.
  * @param opts.agentId Session to retire.
  * @param opts.reason Why the session leaves (fire, last task accepted, replaced by a new session); shown to the session and in the timeline.
+ * @param opts.quiet No last turn: the session already updated its persona (it reflected and called team.close) — archive as soon as it is idle.
+ * @param opts.feedback Owner's review that triggered the leave: stars, comment, task title and id, feedback inbox row (team.feedback_inbox) to mark reflected.
  * @param opts.timeoutSec How long the session gets for its last turn before it is archived anyway. @default 180 @minimum 20 @maximum 900
  */
 export default async function (
@@ -16,6 +18,10 @@ export default async function (
         reason: string;
         /** How long the session gets for its last turn before it is archived anyway. @default 180 @minimum 20 @maximum 900 */
         timeoutSec?: number;
+        /** Owner's review that triggered the leave: stars, comment, task title and id, feedback inbox row (team.feedback_inbox) to mark reflected. */
+        feedback?: { stars: number; comment?: string; title?: string; taskId?: string; inboxId?: string };
+        /** No last turn: the session already updated its persona (it reflected and called team.close) — archive as soon as it is idle. */
+        quiet?: boolean;
     },
 ): Promise<{ agentId: string; persona: string | null; status: 'archived' | 'waiting' | 'pending' | 'already-archived'; archived: boolean; deadlineAt: number | null; task: string | null }> {
     type Row = Record<string, any>;
@@ -42,15 +48,20 @@ export default async function (
     const timeoutSec = Math.max(20, Math.min(900, Math.floor(Number(opts.timeoutSec ?? 180))));
     const startedAt = Date.now();
     const deadlineAt = startedAt + timeoutSec * 1000;
+    const fb = opts.feedback && Number.isInteger(Number(opts.feedback.stars)) ? opts.feedback : null;
+    const fbComment = fb ? String(fb.comment ?? '').replace(/\s+/g, ' ').trim().slice(0, 1500) : '';
     const prompt = [
+        ...(fb ? [`Оценка владельца ★${Number(fb.stars)}${fbComment ? ', комментарий: ' + fbComment : ''} — по задаче «${String(fb.title ?? fb.taskId ?? '').slice(0, 200)}»${fb.taskId ? ' (' + fb.taskId + ')' : ''}. Задачу не переделывай. Сделай вывод: что повторять, чего избегать — и запиши его в память (user/feedback.md или тематическое мемо) в пункте 1, а вывод о том, как тебе работать, — в промпт в пункте 2.`] : []),
         `Твоя сессия уходит в архив (${reason}). Это последний ход: обнови свою персону «${p.name}», больше ничего не делай.`,
         `1) Память — мемо: team.memoSave({ path, title, description, content | ops, reason }) — что следующей сессии нужно знать о работе, команде, файлах, ловушках. Одна тема — одно мемо (code/<файлы>.md, howto/<приём>.md, user/<предпочтения>.md), ≤2500 символов каждое; обновляй существующие, сжимай и удаляй устаревшее (team.memoDelete), а не плоди копии. Оглавление: team.memoSearch({}).`,
         `2) Промпт — team.personaSave({ name: ${JSON.stringify(p.name)}, field: 'prompt', ops, reason }): как тебе лучше работать (привычки, порядок шагов, чего избегать). Раздел <!-- owner --> не трогай. Нечего менять — пропусти.`,
         `Время — ${Math.round(timeoutSec / 60) || 1} мин, потом архив.`,
     ].join('\n');
 
-    if (session?.agent && session.agent.id !== agentId) await ctx.fns.agent.message({ agent: session.agent, to: agentId, text: prompt });
-    else await ctx.fns.agent.wake({ id: agentId, inMs: 1000, prompt });
-    await ctx.fns.cron.add({ name: task, fn: 'team.retireFinish', every: 15, args: { agentId, persona: p.name, reason, startedAt, deadlineAt, version: p.version } });
+    if (!opts.quiet) {
+        if (session?.agent && session.agent.id !== agentId) await ctx.fns.agent.message({ agent: session.agent, to: agentId, text: prompt });
+        else await ctx.fns.agent.wake({ id: agentId, inMs: 1000, prompt });
+    }
+    await ctx.fns.cron.add({ name: task, fn: 'team.retireFinish', every: 15, args: { agentId, persona: p.name, reason, startedAt, deadlineAt, version: p.version, ...(opts.quiet ? { quiet: true } : {}), ...(fb ? { stars: Number(fb.stars), title: String(fb.title ?? ''), ...(fb.inboxId ? { inboxId: fb.inboxId } : {}) } : {}) } });
     return { agentId, persona: p.name, status: 'waiting', archived: false, deadlineAt, task };
 }

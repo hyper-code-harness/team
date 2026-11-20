@@ -1,7 +1,7 @@
 /**
  * Attach a structured report to one of the calling agent's own plan tasks
  *
- * For delegated children (agent.delegate plans). Persona sessions (team.persona_session / persona.current_agent_id) must leave memory: the hand-in is rejected unless the session created or updated at least one of the persona's memos since the task started (or was returned to work) — pass memo here (saved through team.memoSave first) or call team.memoSave/memoDelete before. Call before session.done for that task: stores {summary, done, decisions[{what,why}], checks, files, questions} on scratchpad.plan.tasks[taskId].report so the board card and team.taskView show it. Writes only the caller's own scratchpad; repeat to overwrite. When the plan task is linked to a team task (team.task_link, written by team.dispatch), the team task is also started if needed and submitted for review with this report (result.team). Team-plugin tasks put the same report into taskTransition submit instead.
+ * For delegated children (agent.delegate plans). Persona sessions (team.persona_session / persona.current_agent_id) must leave memory (and a memory write also marks queued owner feedback shown in the brief — team.feedback_inbox status briefed — as reflected, with a chronicle note): the hand-in is rejected unless the session created or updated at least one of the persona's memos since the task started (or was returned to work) — pass memo here (saved through team.memoSave first) or call team.memoSave/memoDelete before. Call before session.done for that task: stores {summary, done, decisions[{what,why}], checks, files, questions} on scratchpad.plan.tasks[taskId].report so the board card and team.taskView show it. Writes only the caller's own scratchpad; repeat to overwrite. When the plan task is linked to a team task (team.task_link, written by team.dispatch), the team task is also started if needed and submitted for review with this report (result.team). Team-plugin tasks put the same report into taskTransition submit instead.
  * @param opts.taskId Plan task id in the caller's own plan.
  * @param opts.report The report: summary required; done, decisions, checks, files, questions optional.
  * @param opts.memo Persona sessions: one memo to create or update with this hand-in (same fields as team.memoSave: path, title, description, content or ops, reason).
@@ -37,6 +37,15 @@ export default async function (
             const since = Math.max(Number(pt?.startedAt ?? 0), Number(pt?.reopenedAt ?? 0));
             const wrote = await ctx.fns.procs.db.select({ sql: "SELECT 1 FROM team.persona_rev WHERE persona_name=? AND field='memo' AND author_kind='agent' AND author_id=? AND at>=? LIMIT 1", params: [persona, String(self), since] });
             if (!wrote.length) throw new Error(`reportTask: ${persona}, сдать без записи в память нельзя. За эту задачу не создано и не обновлено ни одного мемо${memo ? ' (переданное memo ничего не изменило)' : ''}. Повтори вызов с memo: { path: 'code/<тема>.md', title, description, content | ops } — что следующей сессии нужно знать (файлы, ловушки, как проверял), или сначала вызови team.memoSave. Оглавление: team.memoSearch({}).`);
+            // queued owner feedback shown in this session's brief counts as reflected with this memory write
+            try {
+                const fb = await ctx.fns.procs.db.select({ sql: "UPDATE team.feedback_inbox SET status = 'reflected', reflected_at = ?, to_agent_id = ? WHERE persona_name = ? AND status = 'briefed' RETURNING title, kind, stars", params: [Date.now(), String(self), persona] }) as Array<Record<string, any>>;
+                if (fb.length) {
+                    const ms = await ctx.fns.procs.db.select({ sql: "SELECT DISTINCT path FROM team.persona_rev WHERE persona_name=? AND field IN ('memo','prompt') AND author_kind='agent' AND author_id=? AND at>=?", params: [persona, String(self), since] }) as Array<Record<string, any>>;
+                    const text = `${persona} учла отзывы (${fb.map(f => f.kind === 'rating' ? '★' + f.stars : 'комментарий').join(', ')}) в памяти: ${ms.map(m => String(m.path ?? 'prompt')).join(', ')}`.replace(/\s+/g, ' ').slice(0, 280);
+                    await ctx.fns.procs.db.run({ sql: "INSERT INTO team.post (id, author_kind, author_id, team_id, task_id, kind, text, created_at) VALUES (?, 'agent', ?, NULL, NULL, 'note', ?, ?)", params: [Bun.randomUUIDv7(), String(self), text, Date.now()] });
+                }
+            } catch (e) { if (!/feedback_inbox|does not exist/.test(String(e))) throw e; }
         }
         const at = Date.now();
         const out: any = await ctx.fns.session.mutateScratchpad({ id: String(self), mutate: (sp: Record<string, any>) => {

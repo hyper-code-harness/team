@@ -1,7 +1,7 @@
 /**
  * List or search a persona's memos: table of contents with relevance, optional full text
  *
- * Without query: every live memo of the persona, newest first (path, title, description, chars, version, updatedAt). With query: memos ranked by how many query words (≥3 letters, case-insensitive, also word stems of 5+ letters) occur in path, title and description (weight 3) and in the text (weight 1); memos with score 0 are dropped. withContent adds the text. Anyone in the team may read; name defaults to the caller session's persona. Used by team.brief to pick the memos that go into the prompt in full.
+ * Without query: every live memo of the persona, newest first (path, title, description, chars, version, updatedAt). With query: memos ranked by how many query words (≥3 letters, case-insensitive, also word stems of 5+ letters) occur in path, title and description (weight 3) and in the text (weight 1); memos with score 0 are dropped. withContent adds the text. Anyone in the team may read, colleagues' memos too (writing stays with the persona and the owner: team.memoSave); name defaults to the caller session's persona. Used by team.brief to pick the memos that go into the prompt in full.
  * @param opts.name Persona name; default: the persona of the calling session.
  * @param opts.query Words to look for, e.g. the task title; empty lists everything.
  * @param opts.limit Maximum memos. @default 60 @minimum 1 @maximum 200
