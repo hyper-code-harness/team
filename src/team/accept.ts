@@ -1,5 +1,5 @@
 /**
- * Accepts a finished task: a manager's accept is the first review pass; a person only rates (team.rate) and the executor closes
+ * Manager's first review pass on a handed-in task (final: false, stays in Review); a person's call needs stars and is team.rate
  *
  * Review has two passes. First pass — the manager agent (for a delegated child plan task the child's parent agent; for a team task the team supervisor): records a mark 'manager:<agentId>' in team.accept; the task stays in Review marked «проверил <manager> ✓» and waits for the person (team.nextReview gives such tasks first); a manager never overwrites a person's mark. Second pass — the signed-in person only rates: a person's call requires `stars` and is team.rate (the rating goes to the executor in one message; the executor closes the task with team.close after reflecting, or takes it back with team.rework). Without stars a person gets an error. `final`/`accepted` for a person = the task got closed right away (executor session archived). Team-task marks use agent_id ''. Undoing a manager's accept = return to work (team.reopen / team.feedback). Refreshes the 'team' live topic.
  * @param opts.taskId Team task id, or plan task id when agentId is given.

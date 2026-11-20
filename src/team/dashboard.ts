@@ -9,6 +9,11 @@
  * @live team
  * @param opts.managerAgentId Agent whose delegated children (active and archived) are shown as members.
  * @param opts.variant Ignored; kept so old links with a view name still open the list.
+ * @param opts.teamId One team-plugin team (team.team id): its tasks, roster, chronicle and the supervisor's delegated children.
+ * @param opts.projectId Project (projects.id): its teams (supervisor's project) and project personas; several teams → tabs. Default: the caller's project.
+ *
+ * Access follows team.list/team.get: a person sees own teams, an agent only teams it is on; an agent of another project is refused.
+ * Open a project board: canvas.show({ args: { fn: 'team.dashboard', params: { projectId } } }).
  */
 export default async function (
     ctx: Context,
@@ -18,6 +23,10 @@ export default async function (
         managerAgentId?: string;
         /** Ignored; kept so old links with a view name still open the list. */
         variant?: string;
+        /** One team-plugin team (team.team id): its tasks, roster, chronicle and the supervisor's delegated children. */
+        teamId?: string;
+        /** Project (projects.id): its teams (supervisor's project) and project personas; several teams → tabs. Default: the caller's project. */
+        projectId?: string;
     },
 ): Promise<string> {
     type Row = Record<string, any>;
@@ -38,8 +47,45 @@ export default async function (
     const initials = (s: unknown) => { const w = String(s ?? '?').replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/); return ((w[0]?.[0] ?? '?') + (w[1]?.[0] ?? '')).toUpperCase(); };
     const open = (s: unknown) => s !== 'done' && s !== 'cancelled';
 
+    // ---- scope: one manager (old links), one team (teamId) or a whole project (projectId; default: the caller's project)
+    const db = ctx.fns.procs.db;
+    const visible = (await ctx.fns.team.list({})).filter(t => t.status !== 'archived');
+    const meId = (session?.agent || session?.agentId) ? String((await ctx.fns.agent.current({})).id ?? '') : '';
+    const myProject = meId ? String(((await db.select({ sql: 'SELECT project_id FROM agents WHERE id = ?', params: [meId] })) as Row[])[0]?.project_id ?? '') : '';
+    const supProject = new Map<string, string>();
+    if (visible.length) for (const r of await db.select({ sql: 'SELECT id, project_id FROM agents WHERE id = ANY(?::text[])', params: [visible.map(t => t.supervisor_agent_id)] }) as Row[]) supProject.set(String(r.id), String(r.project_id ?? ''));
+    const projOf = (t: { supervisor_agent_id: string }) => supProject.get(String(t.supervisor_agent_id)) ?? '';
+    let mgrOpt = opts.managerAgentId?.trim() || '';
+    let teamOpt = opts.teamId?.trim() || '';
+    let projectId = opts.projectId?.trim() || '';
+    if (projectId && myProject && projectId !== myProject) throw new Error(`team.dashboard: project ${projectId} is not visible from this session (project ${myProject})`);
+    if (!mgrOpt && !teamOpt && !projectId && myProject && visible.some(t => projOf(t) === myProject)) projectId = myProject;
+    let teams = visible;
+    let projectTeams: typeof visible = [];
+    if (teamOpt) {
+        const t = visible.find(x => x.id === teamOpt);
+        if (!t) throw new Error('Team not found or access denied');
+        if (projectId && projOf(t) !== projectId) throw new Error(`team ${teamOpt} is not in project ${projectId}`);
+        if (myProject && projOf(t) && projOf(t) !== myProject) throw new Error('Team not found or access denied');
+    }
+    if (projectId) {
+        projectTeams = visible.filter(t => projOf(t) === projectId);
+        if (!teamOpt && projectTeams.length) teamOpt = projectTeams[0]!.id;
+    }
+    if (teamOpt) {
+        teams = visible.filter(t => t.id === teamOpt);
+        if (!mgrOpt) mgrOpt = String(teams[0]?.supervisor_agent_id ?? '');
+    } else if (projectId) teams = [];
+    const projectTitle = projectId ? String(((await db.select({ sql: 'SELECT title FROM projects WHERE id = ?', params: [projectId] })) as Row[])[0]?.title ?? projectId) : '';
+    // project personas (scope='project'): only the caller's own (person: owner; agent: its project)
+    let projectPersonas: Row[] = [];
+    if (projectId) {
+        const uid = session?.user?.id ? String(session.user.id) : '';
+        try { projectPersonas = await db.select({ sql: `SELECT p.name, COALESCE(p.display_name, p.name) AS display_name, p.role, COALESCE(p.icon, a.icon) AS icon FROM team.persona p LEFT JOIN agents a ON a.id = p.current_agent_id WHERE p.scope = 'project' AND p.project_id = ? AND ((? <> '' AND p.project_id = ?) OR (? = '' AND p.owner_user_id = ?)) ORDER BY p.created_at`, params: [projectId, meId, myProject, meId, uid] }) as Row[]; }
+        catch (e) { if (!/scope|project_id|display_name|does not exist/.test(String(e))) throw e; }
+    }
+
     // ---- data: team-plugin teams
-    const teams = (await ctx.fns.team.list({})).filter(t => t.status !== 'archived');
     const details: Array<{ team: Row; members: Row[]; tasks: Row[] }> = [];
     for (const t of teams) {
         try { const g = await ctx.fns.team.get({ teamId: t.id }); details.push({ team: g.team, members: g.members, tasks: g.tasks }); }
@@ -55,12 +101,12 @@ export default async function (
     }
     const allTasks: Row[] = details.flatMap(d => d.tasks.map((t): Row => ({ ...t, teamTitle: d.team.title })));
     // Chronicle entries (one source for the board and agents): team.feed.
-    const feed = await ctx.fns.team.feed({ ...(opts.managerAgentId?.trim() ? { managerAgentId: opts.managerAgentId.trim() } : {}), limit: 40, all: true });
+    const feed = await ctx.fns.team.feed({ ...(mgrOpt ? { managerAgentId: mgrOpt } : {}), ...(teamOpt || projectId ? { teamIds } : {}), limit: 40, all: true });
 
     // ---- data: delegated children of the manager (same storage as agent.team, active + archived)
     let manager: Row | null = null;
     const children: Row[] = [];
-    const managerId = opts.managerAgentId?.trim();
+    const managerId = mgrOpt;
     if (managerId) {
         const m = await ctx.fns.procs.db.select({ sql: 'SELECT id, title, run_state, updated_at, icon, meta FROM agents WHERE id = ?', params: [managerId] });
         manager = (m as Row[])[0] ?? null;
@@ -205,7 +251,11 @@ export default async function (
         const score = (x: Member) => (who.get(x.id)?.run === 'running' ? 1e15 : 0) + (x.state === 'archived' ? 0 : 1e14) + num(x.ts);
         if (!prev || score(m) > score(prev)) byPerson.set(k, m);
     }
-    const crew = [...byPerson.values()].map(m => {
+    // Team/project board: faces of personas and the manager only; anonymous sessions are counted as «+N».
+    const crewAll = [...byPerson.values()];
+    const crewShown = crewAll.filter(m => m.role === 'manager' || personaByName.has(nameOf(m.id))).slice(0, 12);
+    const crewMore = crewAll.length - crewShown.length;
+    const crew = crewShown.map(m => {
         const w = who.get(m.id);
         return `<a class="mb${m.state === 'archived' ? ' dim' : ''}" href="/agent/${esc(m.id)}" title="${esc(`${nameOf(m.id)} · ${w?.role || m.role} · ${m.state}${who.get(m.id)?.run === 'running' ? ' · работает' : ''}${m.current ? ' — ' + m.current : ''}`)}" aria-label="${esc(nameOf(m.id))}">${face(m.id)}${who.get(m.id)?.run === 'running' ? '<i class="mdot"></i>' : ''}</a>`;
     }).join('');
@@ -325,9 +375,10 @@ export default async function (
 
     const lastTs = Math.max(0, ...cards.map(c => c.ts), ...members.map(m => m.ts), ...acts.map(a => a.ts));
     const anyRunning = [...who.values()].some(w => w.run === 'running' && !w.arch);
-    const title = manager ? String(manager.title ?? manager.id) : details[0]?.team.title ?? 'Team';
+    const teamTitle = teamOpt ? String(details[0]?.team.title ?? teamOpt) : '';
+    const title = projectId ? projectTitle : teamOpt ? teamTitle : manager ? String(manager.title ?? manager.id) : details[0]?.team.title ?? 'Team';
     const css = `
-.tdash{display:flex;flex-direction:column;height:100vh;min-height:0;overflow:hidden;box-sizing:border-box;padding:var(--w-s6) var(--w-s6) 0;
+.tdash{display:flex;flex-direction:column;height:100vh;min-height:0;overflow:hidden;box-sizing:border-box;padding:var(--w-s3) var(--w-s4) 0;
   background:var(--w-surface-document);color:var(--w-ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:var(--w-text-ui);line-height:var(--w-line-ui)}
 .tdash *{box-sizing:border-box}
 .tdash a{color:inherit;text-decoration:none}
@@ -338,7 +389,12 @@ export default async function (
 .tdash .hst.on{color:var(--w-live)}
 .tdash .hdot{width:7px;height:7px;border-radius:999px;background:currentColor;opacity:.8}
 .tdash .on{color:var(--w-live)}
-.tdash .crew{flex:none;display:flex;align-items:center;gap:var(--w-s1);color:var(--w-ink-muted)}
+.tdash .hsc{flex:none;font-size:var(--w-text-small);color:var(--w-ink-muted)}
+.tdash .ttabs{flex:none;display:flex;gap:var(--w-s1);flex-wrap:wrap;padding:var(--w-s2) 0;border-bottom:var(--w-rule)}
+.tdash .ttabs a{padding:2px var(--w-s3);border-radius:6px;color:var(--w-ink-muted);text-decoration:none;font-size:var(--w-text-small)}
+.tdash .ttabs a.on{background:var(--w-surface-raised, rgba(127,127,127,.15));color:var(--w-ink);font-weight:600}
+.tdash .cmore{font-size:var(--w-text-small);color:var(--w-ink-muted);padding-left:var(--w-s1)}
+.tdash .crew{flex:0 1 auto;min-width:0;display:flex;align-items:center;gap:var(--w-s1);overflow:hidden;color:var(--w-ink-muted)}
 .tdash .mb{position:relative;display:inline-flex;align-items:center}
 .tdash .mb .mdot{position:absolute;right:-1px;bottom:-1px;width:8px;height:8px;border-radius:999px;background:var(--w-live);box-shadow:0 0 0 1.5px var(--w-surface-document, #fff);pointer-events:none}
 .tdash .mb:hover{color:var(--w-ink)}
@@ -347,11 +403,11 @@ export default async function (
 .tdash .fc{display:inline-flex}
 .tdash .fc.pf{cursor:pointer;border-radius:999px}.tdash .fc.pf:hover,.tdash .fc.pf:focus-visible{box-shadow:0 0 0 2px var(--w-focus, var(--w-live))}
 .tdash .fc.nf{width:20px;justify-content:center;color:var(--w-ink-faint)}
-.tdash .tl{min-height:0;display:flex;flex-direction:column;padding:var(--w-s4) var(--w-s6) 0}
+.tdash .tl{min-height:0;display:flex;flex-direction:column;padding:var(--w-s3) var(--w-s4) 0}
 .tdash .tl{padding-right:0;border-left:var(--w-rule)}
 .tdash h3{flex:none;margin:0;padding-bottom:var(--w-s2);font-size:var(--w-text-small);font-weight:500;line-height:var(--w-line-small);text-transform:uppercase;letter-spacing:var(--w-caps-spacing);color:var(--w-ink-faint)}
 .tdash h3 .nn{margin-left:var(--w-s1)}
-.tdash .cb{flex:1;min-height:0;overflow:auto;padding-bottom:var(--w-s6)}
+.tdash .cb{flex:1;min-height:0;overflow:auto;padding-bottom:var(--w-s4)}
 .tdash .rk{color:var(--w-ink-faint);font-weight:400}
 .tdash .ld{margin:2px 0 0;font-size:var(--w-text-small);line-height:var(--w-line-small);color:var(--w-ink-faint);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .tdash .ld b{font-weight:500;color:var(--w-ink-muted)}
@@ -373,7 +429,7 @@ export default async function (
 .tdash .tl time{display:block;font-size:var(--w-text-small);line-height:var(--w-line-small);color:var(--w-ink-faint);font-variant-numeric:tabular-nums}
 .tdash .tl p{margin:0;color:var(--w-ink-muted);overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .tdash .tl p b{font-weight:500;color:var(--w-ink)}
-@media (max-width:1000px){.tdash{height:auto;overflow:visible;padding:var(--w-s4)}}
+@media (max-width:1000px){.tdash{height:auto;overflow:visible;padding:var(--w-s3)}}
 .tdash .tdx-h{display:flex;align-items:center;gap:var(--w-s1)}
 .tdash .tdx-b{all:unset;flex:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;color:var(--w-ink-faint)}
 .tdash .tdx-b:hover{background:var(--w-hover);color:var(--w-ink)}.tdash .tdx-b:focus-visible{outline:var(--w-focus-width, 2px) solid var(--w-link)}
@@ -395,7 +451,7 @@ html[data-tdx-tl=shut] .tdash .tdx-tl .tdx-h span{writing-mode:vertical-rl;paddi
 .tdash .rbtn .stk{display:flex}.tdash .rbtn .stk>*{margin-left:-6px;border-radius:50%;box-shadow:0 0 0 2px var(--w-bg, #fff)}.tdash .rbtn .stk>*:first-child{margin-left:0}
 /* linear */
 .tdash .lr{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 22rem}
-.tdash .lst{min-height:0;overflow:auto;padding:var(--w-s2) var(--w-s6) var(--w-s4) 0}
+.tdash .lst{min-height:0;overflow:auto;padding:var(--w-s2) var(--w-s4) var(--w-s3) 0}
 .tdash .gp h3{padding:var(--w-s3) var(--w-s2) var(--w-s1)}
 .tdash .gp h3 small{font-weight:normal}
 .tdash .hs>summary{cursor:pointer;list-style:none}.tdash .hs>summary::-webkit-details-marker{display:none}
@@ -433,9 +489,15 @@ html[data-tdx-tl=shut] .tdash .tdx-tl .tdx-h span{writing-mode:vertical-rl;paddi
 .tdash .sz{display:inline-flex;align-items:center;justify-content:center;min-width:1.1rem;height:1.1rem;padding:0 3px;box-sizing:border-box;border:1px solid var(--w-border);border-radius:4px;font-size:10px;font-weight:600;line-height:1;color:var(--w-ink-muted);font-variant-numeric:tabular-nums}
 `;
 
-    const rootId = `tdash-${managerId || 'all'}`;
+    const scopeKey = (projectId ? 'p-' + projectId : '') + (teamOpt ? '-t-' + teamOpt : '') || managerId || 'all';
+    const rootId = `tdash-${scopeKey.replace(/[^\w-]/g, '_')}`;
     // One look only (the dense list); an old `variant` in the URL is ignored.
-    const selfUrl = `/rpc/team.dashboard?${encodeURIComponent(JSON.stringify(managerId ? { managerAgentId: managerId } : {}))}`;
+    // Stable address: exactly the scope the caller asked for (old links keep { managerAgentId }).
+    const selfParams: Row = opts.projectId?.trim() ? { projectId: projectId, ...(opts.teamId?.trim() ? { teamId: teamOpt } : {}) } : opts.teamId?.trim() ? { teamId: teamOpt } : managerId && opts.managerAgentId?.trim() ? { managerAgentId: managerId } : {};
+    const selfUrl = `/rpc/team.dashboard?${encodeURIComponent(JSON.stringify(selfParams))}`;
+    // Several teams in a project: one tab per team (a link to { projectId, teamId }).
+    const tabs = projectId && projectTeams.length > 1 ? `<nav class="ttabs" aria-label="Команды проекта">${projectTeams.map(t => `<a href="/rpc/team.dashboard?${esc(encodeURIComponent(JSON.stringify({ projectId, teamId: t.id })))}"${t.id === teamOpt ? ' aria-current="page" class="on"' : ''}>${esc(t.title)}</a>`).join('')}</nav>` : '';
+    const scopeNote = projectId ? (projectTeams.length ? (projectTeams.length === 1 && teamTitle !== projectTitle ? `<span class="hsc" title="Команда проекта">${esc(teamTitle)}</span>` : '') : '<span class="hsc mu">в проекте пока нет команды</span>') : teamOpt ? `<span class="hsc" title="${esc(details[0]?.team.goal ?? '')}">${esc(details[0]?.team.status ?? '')}</span>` : '';
     const timeline = `<h3 class="tdx-h"><button type="button" class="tdx-b" data-tdx-tl aria-label="Свернуть или развернуть хронику" title="Свернуть или развернуть хронику">${ctx.fns.w.icon({ name: 'caret-right', size: 14 })}</button><span>Хроника</span></h3><div class="cb">${actHtml ? `<ul>${actHtml}</ul>` : '<p class="mu">Пока тихо.</p>'}</div>`;
     let body: string;
     {
@@ -449,7 +511,11 @@ html[data-tdx-tl=shut] .tdash .tdx-tl .tdx-h span{writing-mode:vertical-rl;paddi
     }
     // «Команда» in the header: a stack of persona faces opening team.roster in the popup (roster, goal, or the «Создать команду» form).
     const rosterFaces = await ctx.fns.procs.db.select({ sql: `SELECT p.name, COALESCE(p.icon, a.icon) AS icon FROM team.team t JOIN team.team_persona tp ON tp.team_id = t.id AND tp.active JOIN team.persona p ON p.name = tp.persona_name LEFT JOIN agents a ON a.id = p.current_agent_id
-        WHERE t.status IN ('draft','active') ${managerId ? 'AND t.supervisor_agent_id = ?' : ''} ORDER BY t.created_at DESC, tp.joined_at LIMIT 5`, params: managerId ? [managerId] : [] }) as Row[];
+        WHERE t.status IN ('draft','active') ${teamOpt ? 'AND t.id = ?' : projectId ? 'AND false' : managerId ? 'AND t.supervisor_agent_id = ?' : ''} ORDER BY t.created_at DESC, tp.joined_at LIMIT ${teamOpt ? 50 : 5}`, params: teamOpt ? [teamOpt] : projectId ? [] : managerId ? [managerId] : [] }) as Row[];
+    // Project / team board: personas of the team and of the project join the faces (one per name, sessions win).
+    const shownNames = new Set([...byPerson.keys()]);
+    const extraFaces = (teamOpt || projectId) ? [...rosterFaces, ...projectPersonas].filter(p => { const k = String(p.name); if (shownNames.has(k) || shownNames.has(String(p.display_name ?? ''))) return false; shownNames.add(k); return true; })
+        .map(p => `<span class="mb fc pf" role="button" tabindex="0" hx-popup="team.persona" hx-popup-params="${esc(JSON.stringify({ name: String(p.name) }))}" title="${esc(String(p.display_name ?? p.name) + (p.role ? ' · ' + p.role : ''))}" aria-label="${esc('Персона ' + String(p.display_name ?? p.name))}">${ctx.fns.w.chatIcon({ icon: p.icon ?? null, size: 'sm' })}</span>`).join('') : '';
     const rosterBtn = `<button type="button" class="rbtn" hx-popup="team.roster" hx-popup-params="${esc(JSON.stringify({ ...(managerId ? { managerAgentId: managerId } : {}), back: selfUrl }))}" data-popup-title="Команда" aria-label="Команда" title="${esc(rosterFaces.length ? 'Команда: ' + rosterFaces.map(f => f.name).join(', ') : 'Команды пока нет — открыть и создать')}">${ctx.fns.w.icon({ name: 'users-three', size: 16 })}</button>`;
     // Header: one line — title + short status (details in its title), view tabs, team icon, bare faces.
     const statusTip = `обновлено ${lastTs ? clock(lastTs) + ' UTC, ' + short(lastTs) + ' назад' : '—'} · ${counters}`;
@@ -457,7 +523,7 @@ html[data-tdx-tl=shut] .tdash .tdx-tl .tdx-h span{writing-mode:vertical-rl;paddi
     // Side timeline collapse: state on <html data-tdx-tl>, kept in localStorage, so the 10s live swap does not reset it; narrow screens start collapsed.
     const tlScript = `<script>(function(){var d=document.documentElement,k='team.dashboard.timeline';function apply(){var v=null;try{v=localStorage.getItem(k)}catch(e){}if(v!=='open'&&v!=='shut')v=matchMedia('(max-width:700px)').matches?'shut':'open';d.dataset.tdxTl=v}apply();if(window.__tdxTl)return;window.__tdxTl=1;document.addEventListener('click',function(e){var b=e.target&&e.target.closest&&e.target.closest('[data-tdx-tl]');if(!b)return;var v=d.dataset.tdxTl==='shut'?'open':'shut';d.dataset.tdxTl=v;try{localStorage.setItem(k,v)}catch(_){}})})()</script>`;
     const inner = `<style>${css}</style>${tlScript}
-<header class="hd"><div class="mast"><h1 title="${esc(title)}">${esc(title)}</h1>${status}</div>${rosterBtn}<div class="crew">${crew}</div></header>
+<header class="hd"><div class="mast"><h1 title="${esc(title)}">${esc(title)}</h1>${scopeNote}${status}</div>${rosterBtn}<div class="crew">${crew}${extraFaces}${crewMore > 0 ? `<span class="cmore" title="${esc('Ещё сессий без персоны: ' + crewMore)}">+${crewMore}</span>` : ''}</div></header>${tabs}
 ${body}`;
     return ctx.fns.ui.live({ id: rootId, url: selfUrl, topic: 'team', every: 10, attrs: `class="tdash" hx-select="#${rootId}"`, html: inner });
 }

@@ -23,7 +23,7 @@ export default async function (
         if (!text) throw new Error('Комментарий пустой');
         if (text.length > 8000) throw new Error('Комментарий длиннее 8000 символов');
         const actor = await ctx.fns.team.resolveActor({});
-        if (actor.kind !== 'user') throw new Error('Feedback is sent on behalf of the signed-in person');
+        if (actor.kind !== 'user') throw new Error('Feedback is sent on behalf of the signed-in person — Агент: оценку/отзыв ставит только человек на /team/; работу дай через team.delegate({agent, persona, title, human, details}); команду и персону агент сессии человека создаёт сам (team.create, team.personaCreate)');
         const key = 'team-feedback:' + Bun.randomUUIDv7();
         const taskId = String(opts.taskId ?? '').trim();
         if (!taskId) throw new Error('taskId required');

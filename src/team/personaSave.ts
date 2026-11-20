@@ -1,7 +1,7 @@
 /**
  * Change a persona's prompt, notes or card and record the revision
  *
- * One write path for personas. field 'prompt' | 'notes': give ops (deltas: add a line, remove a line — preferred, so knowledge is not lost by rewriting) or text (full replace), or revertOf (a revision id: the field gets that revision's `after` state, i.e. "roll back to this one"). field 'card': owner only — role, responsibilities, icon, plugins, model, limits. Who may write: the owner (author user), or the persona itself — an agent that is the persona's current or past session — and only prompt/notes. The owner-only section of the prompt (between `<!-- owner -->` and `<!-- /owner -->`) cannot be changed by the persona. Size limits: prompt ≤ limits.promptChars (default 4000), notes ≤ limits.notesChars (default 6000) characters. baseVersion, when given, must equal the current persona version (stale edit check). Every save writes team.persona_rev (before, after, short summary, reason, base_version) and a public team.event kind 'persona' in each active team of the persona, then refreshes the 'team' live topic. No-op edits are not recorded.
+ * One write path for personas. field 'prompt' | 'notes': give ops (deltas: add a line, remove a line — preferred, so knowledge is not lost by rewriting) or text (full replace), or revertOf (a revision id: the field gets that revision's `after` state, i.e. "roll back to this one"). field 'card': owner only — role, responsibilities, icon, plugins, model, limits. Who may write: the owner (author user, or an agent of the owner's own session — counts as the owner, recorded on_behalf_of; it sees only system personas and those of its project), or the persona itself — an agent that is the persona's current or past session — and only prompt/notes. The owner-only section of the prompt (between `<!-- owner -->` and `<!-- /owner -->`) cannot be changed by the persona. Size limits: prompt ≤ limits.promptChars (default 4000), notes ≤ limits.notesChars (default 6000) characters. baseVersion, when given, must equal the current persona version (stale edit check). Every save writes team.persona_rev (before, after, short summary, reason, base_version) and a public team.event kind 'persona' in each active team of the persona, then refreshes the 'team' live topic. No-op edits are not recorded.
  * @param opts.name Persona name.
  * @param opts.field What to change: 'prompt', 'notes' or 'card' (owner only).
  * @param opts.ops Deltas for prompt/notes: add appends a line (or inserts after a line equal to `after`), remove deletes lines equal to `line`.
@@ -40,16 +40,25 @@ export default async function (
     if (!['prompt', 'notes', 'card'].includes(opts.field)) throw new Error('personaSave: field must be prompt, notes or card');
     const reason = String(opts.reason ?? '').trim().slice(0, 500);
     const OWN_RE = /<!--\s*owner\s*-->[\s\S]*?<!--\s*\/owner\s*-->/g;
+    // Project visibility for an agent acting as the owner (checked outside the transaction: personaResolve may retry a failed query).
+    let visErr = '';
+    if (actor.kind === 'agent') { try { if ((await ctx.fns.team.personaResolve({ name }))?.name !== name) visErr = `persona ${name} is not visible from this session's project`; } catch (e) { visErr = (e as Error).message; } }
     const out = await ctx.fns.procs.db.transaction({ fn: async () => {
         const rows = await ctx.fns.procs.db.select({ sql: 'SELECT * FROM team.persona WHERE name=? FOR UPDATE', params: [name] }) as Row[];
         const p = rows[0]; if (!p) throw new Error('personaSave: no persona ' + name);
-        const isOwner = actor.kind === 'user' && actor.id === String(p.owner_user_id);
+        // Owner = the signed-in person, or an agent of the owner's own session (team.resolveOwnerActor; recorded on_behalf_of).
+        let own: { ownerId: string; onBehalfOf: string | null } | null = null;
+        try { own = await ctx.fns.team.resolveOwnerActor({}); } catch { own = null; }
+        const isOwner = !!own && own.ownerId === String(p.owner_user_id);
         let isSelf = false;
         if (actor.kind === 'agent') {
             const s = await ctx.fns.procs.db.select({ sql: 'SELECT 1 FROM team.persona_session WHERE persona_name=? AND agent_id=? UNION ALL SELECT 1 FROM team.persona WHERE name=? AND current_agent_id=?', params: [name, actor.id, name, actor.id] });
             isSelf = s.length > 0;
         }
         if (!isOwner && !isSelf) throw new Error('personaSave: only the owner or the persona itself may edit');
+        // An agent acting for the owner sees only system personas and those of its own project.
+        if (!isSelf && actor.kind === 'agent' && visErr) throw new Error(visErr);
+        const onBehalfOf = !isSelf && actor.kind === 'agent' ? own?.onBehalfOf ?? null : null;
         if (opts.field === 'card' && !isOwner) throw new Error('personaSave: card (role, plugins, model, limits) is owner only');
         if (opts.baseVersion !== undefined && Number(opts.baseVersion) !== Number(p.version)) throw new Error(`personaSave: stale edit, base ${opts.baseVersion} ≠ current ${p.version}`);
         const limits: Row = (typeof p.limits === 'string' ? JSON.parse(p.limits) : p.limits) ?? {};
@@ -112,12 +121,12 @@ export default async function (
         const sets = Object.keys(upd);
         await ctx.fns.procs.db.run({ sql: `UPDATE team.persona SET ${sets.map(k => k === 'limits' ? 'limits=?::jsonb' : k === 'plugins' ? 'plugins=?::text[]' : k + '=?').join(',')}, version=?, updated_at=? WHERE name=?`, params: [...sets.map(k => k === 'limits' ? JSON.stringify(upd[k]) : upd[k]), version, now, name] });
         const revisionId = Bun.randomUUIDv7();
-        await ctx.fns.procs.db.run({ sql: 'INSERT INTO team.persona_rev(id,persona_name,field,author_kind,author_id,before,after,summary,reason,base_version,revert_of,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', params: [revisionId, name, opts.field, actor.kind, actor.id, before, after, summary, reason, Number(p.version), opts.revertOf ?? null, now] });
+        await ctx.fns.procs.db.run({ sql: 'INSERT INTO team.persona_rev(id,persona_name,field,author_kind,author_id,before,after,summary,reason,base_version,revert_of,at,on_behalf_of) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', params: [revisionId, name, opts.field, actor.kind, actor.id, before, after, summary, reason, Number(p.version), opts.revertOf ?? null, now, onBehalfOf] });
         const teams = await ctx.fns.procs.db.select({ sql: "SELECT tp.team_id FROM team.team_persona tp JOIN team.team t ON t.id=tp.team_id WHERE tp.persona_name=? AND tp.active AND t.status<>'archived'", params: [name] }) as Row[];
         const text = `${name}: ${summary}` + (opts.revertOf ? ' (откат)' : '') + (reason ? ' — ' + reason : '');
         for (const t of teams) {
             const s = await ctx.fns.procs.db.select({ sql: 'UPDATE team.team SET next_seq=next_seq+1 WHERE id=? RETURNING next_seq', params: [t.team_id] }) as Row[];
-            await ctx.fns.procs.db.run({ sql: "INSERT INTO team.event(id,team_id,seq,actor_kind,actor_id,kind,text,payload,timestamp) VALUES(?,?,?,?,?,'persona',?,?::jsonb,?)", params: [Bun.randomUUIDv7(), t.team_id, Number(s[0]!.next_seq), actor.kind, actor.id, text.slice(0, 1000), JSON.stringify({ persona: name, field: opts.field, revisionId, summary, reason, revertOf: opts.revertOf ?? null, version }), now] });
+            await ctx.fns.procs.db.run({ sql: "INSERT INTO team.event(id,team_id,seq,actor_kind,actor_id,kind,text,payload,timestamp,on_behalf_of) VALUES(?,?,?,?,?,'persona',?,?::jsonb,?,?)", params: [Bun.randomUUIDv7(), t.team_id, Number(s[0]!.next_seq), actor.kind, actor.id, text.slice(0, 1000), JSON.stringify({ persona: name, field: opts.field, revisionId, summary, reason, revertOf: opts.revertOf ?? null, version }), now, onBehalfOf] });
         }
         return { name, field: opts.field, changed: true, version, revisionId, summary };
     } }) as { name: string; field: string; changed: boolean; version: number; revisionId: string | null; summary: string };

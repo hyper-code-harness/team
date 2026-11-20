@@ -1,7 +1,7 @@
 /**
  * Create or update one memo of a persona's memory and record the revision
  *
- * Persona memory is a set of memos, each at its own path ("code/board.md", "user/preferences.md", "howto/screenshots.md") with a title, a one-line description (shown in the brief's table of contents) and the text. Give content (full text) or ops (line deltas: add, or remove a line equal to `line`); a new memo needs title and content (or ops). revertOf (a memo revision id) restores that revision's state — text, title, description — and brings back a deleted memo. Who may write: the persona's owner (signed-in person) or the persona itself (an agent that is its current or past session, team.persona_session). name defaults to the caller session's persona. Size: one memo ≤ limits.memoChars (default 2500) characters — longer text is rejected with a request to compress it or split it into several memos, never cut; at most limits.memoCount (default 60) live memos. baseVersion, when given, must equal the memo's version. Every change writes team.persona_rev (field 'memo', path, before/after text, meta {title, description, deleted}) and a public team.event 'persona' in each active team of the persona; no-op edits are not recorded. This is the write that team.reportTask requires from a persona before it accepts a hand-in.
+ * Persona memory is a set of memos, each at its own path ("code/board.md", "user/preferences.md", "howto/screenshots.md") with a title, a one-line description (shown in the brief's table of contents) and the text. Give content (full text) or ops (line deltas: add, or remove a line equal to `line`); a new memo needs title and content (or ops). revertOf (a memo revision id) restores that revision's state — text, title, description — and brings back a deleted memo. Who may write: the persona's owner (signed-in person, or an agent of the owner's own session — recorded on_behalf_of the owner; that agent sees only system personas and those of its project) or the persona itself (an agent that is its current or past session, team.persona_session). name defaults to the caller session's persona. Size: one memo ≤ limits.memoChars (default 2500) characters — longer text is rejected with a request to compress it or split it into several memos, never cut; at most limits.memoCount (default 60) live memos. baseVersion, when given, must equal the memo's version. Every change writes team.persona_rev (field 'memo', path, before/after text, meta {title, description, deleted}) and a public team.event 'persona' in each active team of the persona; no-op edits are not recorded. This is the write that team.reportTask requires from a persona before it accepts a hand-in.
  * @param opts.name Persona name; default: the persona of the calling session.
  * @param opts.path Memo path, e.g. "code/board.md": letters, digits, - _ . / only, no leading slash, no "..".
  * @param opts.title Short title shown in the table of contents; required for a new memo.
@@ -49,12 +49,21 @@ export default async function (
     if (!name) throw new Error('memoSave: name required (this session is not a persona session)');
     const reason = String(opts.reason ?? '').trim().slice(0, 500);
     const clean = (s: string) => s.replace(/\u0000/g, '').replace(/\r\n/g, '\n').replace(/\s+$/, '');
+    // Project visibility for an agent acting as the owner (checked outside the transaction: personaResolve may retry a failed query).
+    let visErr = '';
+    if (actor.kind === 'agent') { try { if ((await ctx.fns.team.personaResolve({ name }))?.name !== name) visErr = `persona ${name} is not visible from this session's project`; } catch (e) { visErr = (e as Error).message; } }
     const out = await ctx.fns.procs.db.transaction({ fn: async () => {
         const p = (await ctx.fns.procs.db.select({ sql: 'SELECT * FROM team.persona WHERE name=? FOR UPDATE', params: [name] }) as Row[])[0];
         if (!p) throw new Error('memoSave: no persona ' + name);
-        const isOwner = actor.kind === 'user' && actor.id === String(p.owner_user_id);
+        // Owner = the signed-in person, or an agent of the owner's own session (team.resolveOwnerActor; recorded on_behalf_of).
+        let own: { ownerId: string; onBehalfOf: string | null } | null = null;
+        try { own = await ctx.fns.team.resolveOwnerActor({}); } catch { own = null; }
+        const isOwner = !!own && own.ownerId === String(p.owner_user_id);
         const isSelf = actor.kind === 'agent' && (await ctx.fns.procs.db.select({ sql: 'SELECT 1 FROM team.persona_session WHERE persona_name=? AND agent_id=? UNION ALL SELECT 1 FROM team.persona WHERE name=? AND current_agent_id=?', params: [name, actor.id, name, actor.id] })).length > 0;
         if (!isOwner && !isSelf) throw new Error(`memoSave: only the owner or a session of ${name} may write its memos (caller ${actor.kind} ${actor.id} is not in team.persona_session)`);
+        // An agent acting for the owner sees only system personas and those of its own project.
+        if (!isSelf && actor.kind === 'agent' && visErr) throw new Error(visErr);
+        const onBehalfOf = !isSelf && actor.kind === 'agent' ? own?.onBehalfOf ?? null : null;
         const limits: Row = (typeof p.limits === 'string' ? JSON.parse(p.limits) : p.limits) ?? {};
         const cur = (await ctx.fns.procs.db.select({ sql: 'SELECT * FROM team.persona_memo WHERE persona_name=? AND path=? FOR UPDATE', params: [name, path] }) as Row[])[0];
         const live = cur && cur.deleted_at == null;
@@ -104,12 +113,12 @@ export default async function (
         if (cur) await ctx.fns.procs.db.run({ sql: 'UPDATE team.persona_memo SET title=?, description=?, content=?, version=?, updated_at=?, deleted_at=NULL WHERE persona_name=? AND path=?', params: [title, description, after, version, now, name, path] });
         else await ctx.fns.procs.db.run({ sql: 'INSERT INTO team.persona_memo(persona_name,path,title,description,content,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', params: [name, path, title, description, after, version, now, now] });
         const revisionId = Bun.randomUUIDv7();
-        await ctx.fns.procs.db.run({ sql: "INSERT INTO team.persona_rev(id,persona_name,field,path,meta,author_kind,author_id,before,after,summary,reason,base_version,revert_of,at) VALUES(?,?,'memo',?,?::jsonb,?,?,?,?,?,?,?,?,?)", params: [revisionId, name, path, JSON.stringify({ title, description, deleted: false }), actor.kind, actor.id, before, after, summary, reason, Number(cur?.version ?? 0), opts.revertOf ?? null, now] });
+        await ctx.fns.procs.db.run({ sql: "INSERT INTO team.persona_rev(id,persona_name,field,path,meta,author_kind,author_id,before,after,summary,reason,base_version,revert_of,at,on_behalf_of) VALUES(?,?,'memo',?,?::jsonb,?,?,?,?,?,?,?,?,?,?)", params: [revisionId, name, path, JSON.stringify({ title, description, deleted: false }), actor.kind, actor.id, before, after, summary, reason, Number(cur?.version ?? 0), opts.revertOf ?? null, now, onBehalfOf] });
         const teams = await ctx.fns.procs.db.select({ sql: "SELECT tp.team_id FROM team.team_persona tp JOIN team.team t ON t.id=tp.team_id WHERE tp.persona_name=? AND tp.active AND t.status<>'archived'", params: [name] }) as Row[];
         const text = `${name}: ${summary}` + (opts.revertOf ? ' (откат)' : '') + (reason ? ' — ' + reason : '');
         for (const t of teams) {
             const s = await ctx.fns.procs.db.select({ sql: 'UPDATE team.team SET next_seq=next_seq+1 WHERE id=? RETURNING next_seq', params: [t.team_id] }) as Row[];
-            await ctx.fns.procs.db.run({ sql: "INSERT INTO team.event(id,team_id,seq,actor_kind,actor_id,kind,text,payload,timestamp) VALUES(?,?,?,?,?,'persona',?,?::jsonb,?)", params: [Bun.randomUUIDv7(), t.team_id, Number(s[0]!.next_seq), actor.kind, actor.id, text.slice(0, 1000), JSON.stringify({ persona: name, field: 'memo', path, revisionId, summary, reason, revertOf: opts.revertOf ?? null, version }), now] });
+            await ctx.fns.procs.db.run({ sql: "INSERT INTO team.event(id,team_id,seq,actor_kind,actor_id,kind,text,payload,timestamp,on_behalf_of) VALUES(?,?,?,?,?,'persona',?,?::jsonb,?,?)", params: [Bun.randomUUIDv7(), t.team_id, Number(s[0]!.next_seq), actor.kind, actor.id, text.slice(0, 1000), JSON.stringify({ persona: name, field: 'memo', path, revisionId, summary, reason, revertOf: opts.revertOf ?? null, version }), now, onBehalfOf] });
         }
         return { name, path, changed: true, created: !live, version, chars: after.length, revisionId, summary };
     } }) as { name: string; path: string; changed: boolean; created: boolean; version: number; chars: number; revisionId: string | null; summary: string };

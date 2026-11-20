@@ -1,7 +1,7 @@
 /**
  * Returns a handed-in task to work with the owner's comment: the same assignee continues the same task
  *
- * Signed-in person (owner) or the manager agent (for a delegated child: its parent; for a team task: the supervisor, enforced by executeCommand). The comment says what is wrong and what to finish. Team task: in review → changes to the same assignee (reason = comment), then team.dispatch hands it to the assignee's persona session when there is one; done/cancelled (terminal in reduceTask) → a new team task «Доделать: <title>» for the same assignee, linked as its continuation; assigned/working → the comment goes to the assignee (say). Delegated child plan task (agentId) whose session is alive: the plan task goes back to active (delegation working again, the previous report kept in reopens[]), acceptance marks are removed, and the child gets «Владелец вернул задачу …: <comment>. Доделай и снова отчитайся (finishTask)» — the board shows it in «В работе» until a new report. Archived child: team.delegate to the same persona (meta.persona of the archived session) with human «Доделать: <title>» and details = original task + previous report (summary, notDone, next) + the comment; the old task is marked continued (leaves Review) and the new one is linked to it (reopenOf). A plan task linked to a team task (team.task_link) is reopened as that team task. Every reopen is a row in team.reopen and an entry of kind 'reopen' in team.feed and the task history; refreshes the 'team' live topic.
+ * Signed-in person (owner) or the manager agent (for a delegated child: its parent; for a team task: the supervisor, enforced by executeCommand). The comment says what is wrong and what to finish. Team task: in review → changes to the same assignee (reason = comment), then team.dispatch hands it to the assignee's persona session when there is one; done/cancelled (terminal in reduceTask) → a new team task «Доделать: <title>» for the same assignee, linked as its continuation; assigned/working → the comment goes to the assignee (say). Delegated child plan task (agentId) whose session is alive: the plan task goes back to active (delegation working again, the previous report kept in reopens[]), acceptance marks are removed, and the child gets «Владелец вернул задачу …: <comment>. Доделай и снова отчитайся (finishTask)» — the board shows it in «В работе» until a new report. Auto-archived child (agent.archiveCompleted archives every idle finished delegated child after the global setting agent.teamArchiveAfterMs, 60 s by default — so a child is usually archived soon after its report/accept) that is not retired (no ended team.persona_session row) is unarchived and reopened in the same session as above. Retired child: team.delegate to the same persona (meta.persona of the archived session) with human «Доделать: <title>» and short details — comment (≤3000), the human part of the original task (≤1200), previous report (summary, notDone, next; ≤1500) and a pointer to team.sessionRead for the full text; the old brief is not copied, team.delegate adds a fresh one within the plan limit; the old task is marked continued (leaves Review) and the new one is linked to it (reopenOf). A plan task linked to a team task (team.task_link) is reopened as that team task. Every reopen is a row in team.reopen and an entry of kind 'reopen' in team.feed and the task history; refreshes the 'team' live topic.
  * @param opts.taskId Team task id, or plan task id when agentId is given.
  * @param opts.agentId Delegated child whose plan holds the task.
  * @param opts.comment What is wrong and what to finish, up to 8000 characters; required.
@@ -61,6 +61,12 @@ export default async function (
         const title = String(t.title ?? taskId);
         const r = t.result && typeof t.result === 'object' ? t.result as Row : null;
         const report: Row | null = t.report ?? (r && (r.report || r.summary || r.notDone || r.next) ? await ctx.fns.team.normalizeReport({ report: r.report ?? r, fallbackSummary: String(t.resultSummary ?? '') || undefined }) : t.resultSummary ? { summary: String(t.resultSummary) } : null);
+        // Auto-archived (agent.archiveCompleted archives every idle finished child after teamArchiveAfterMs, 60 s by default) but not retired → unarchive and continue in the same session; a retired persona session (persona_session.ended_at) gets a new session below.
+        let retired = false;
+        if (a.archived_at != null) {
+            try { retired = ((await ctx.fns.procs.db.select({ sql: 'SELECT 1 FROM team.persona_session WHERE agent_id = ? AND ended_at IS NOT NULL', params: [agentId] }) as Row[]).length > 0); } catch (e) { if (!/persona_session|does not exist/.test(String(e))) throw e; }
+            if (!retired) { await ctx.fns.session.unarchive({ id: agentId }); a.archived_at = null; try { await ctx.fns.events.refreshAgentMeta({ agentId: String(a.parent_id ?? agentId), section: 'team', reason: 'team-reopen-unarchive' }); } catch {} }
+        }
         if (a.archived_at == null) {
             if (t.status !== 'done' && t.status !== 'active') throw new Error('Задача ещё не начата — вернуть в работу нечего');
             const out: any = await ctx.fns.session.mutateScratchpad({ id: agentId, mutate: (sp: Row, now: number) => {
@@ -89,23 +95,24 @@ export default async function (
         const persona = String(json(a.meta)?.persona?.name ?? '').trim();
         const instr = String(t.instructions ?? '');
         const cut = /^[ \t]*---[ \t]*$/m.exec(instr);
+        // Short on purpose: the new session gets a fresh brief from team.delegate; the full original text is in the old session (team.sessionRead), so only its human part goes here.
         const human0 = (cut ? instr.slice(0, cut.index) : instr).trim();
-        // the old brief (team rules, feed) is dropped: team.delegate adds a fresh one
-        const agentPart = (cut ? instr.slice(cut.index + cut[0].length) : '').split(/\n+Team rules — /)[0]!.trim();
         const list = (xs: unknown) => (Array.isArray(xs) ? xs : []).map((x: any) => '- ' + (typeof x === 'string' ? x : String(x?.title ?? '') + (x?.why ? ' — ' + x.why : ''))).join('\n');
+        const clip = (s: string, n: number) => s.length <= n ? s : s.slice(0, n) + '… [обрезано, полностью: team.sessionRead({ agentId: \'' + agentId + '\', fromIdx: 0 })]';
         const details = [
-            'Это продолжение задачи «' + title + '» (агент ' + agentId + ', задача ' + taskId + '), которую владелец вернул в работу. Не начинай с нуля: сначала прочти комментарий владельца и прошлый отчёт, доделай, отчитайся заново.',
-            '## Комментарий владельца\n' + comment,
-            '## Исходное задание\n' + (human0 || title) + (agentPart ? '\n\n' + agentPart : ''),
-            '## Прошлый отчёт\n' + (report ? [String(report.summary ?? ''), Array.isArray(report.notDone) && report.notDone.length ? 'Не сделано:\n' + list(report.notDone) : '', Array.isArray(report.next) && report.next.length ? 'Дальше:\n' + list(report.next) : ''].filter(Boolean).join('\n\n') : '(отчёта нет)'),
-        ].join('\n\n').slice(0, 9000);
+            'Это продолжение задачи «' + title + '» (агент ' + agentId + ', задача ' + taskId + '), которую владелец вернул в работу. Не начинай с нуля: сначала прочти комментарий владельца и прошлый отчёт, доделай, отчитайся заново. Полное исходное задание и ход работы — в старой сессии: team.sessionRead({ agentId: \'' + agentId + '\', fromIdx: 0 }).',
+            '## Комментарий владельца\n' + clip(comment, 3000),
+            '## Исходное задание\n' + clip(human0 || title, 1200),
+            '## Прошлый отчёт\n' + (report ? clip([String(report.summary ?? ''), Array.isArray(report.notDone) && report.notDone.length ? 'Не сделано:\n' + list(report.notDone) : '', Array.isArray(report.next) && report.next.length ? 'Дальше:\n' + list(report.next) : ''].filter(Boolean).join('\n\n'), 1500) : '(отчёта нет)'),
+        ].join('\n\n');
         const human = ('Доделать: ' + title).replace(/\n---/g, ' ').slice(0, 300);
         const d = await ctx.fns.team.delegate({ agent: manager, title: (persona ? persona + ': ' : '') + 'доделать ' + title.replace(/^[\p{L}-]{2,20}:\s*/u, '').slice(0, 150), human, details, ...(persona ? { persona } : {}) });
         await ctx.fns.procs.db.run({ sql: 'CREATE TABLE IF NOT EXISTS team.accept (agent_id text NOT NULL, task_id text NOT NULL, accepted_by text NOT NULL, accepted_at bigint NOT NULL, PRIMARY KEY (agent_id, task_id))' });
         // the old card leaves Review: its work continues in the new session (accepted() lists it as continued)
         await unaccept(agentId, taskId);
-        await record(agentId, taskId, 'redelegate', d.id, d.id, 'task');
-        return { kind: 'child', action: 'redelegate', to: d.id, toName: persona || await nameOf(d.id), title, at, reopenId, newAgentId: d.id, newTaskId: 'task' };
+        const newTid = String(d.taskId || 'task');
+        await record(agentId, taskId, 'redelegate', d.id, d.id, newTid);
+        return { kind: 'child', action: 'redelegate', to: d.id, toName: persona || await nameOf(d.id), title, at, reopenId, newAgentId: d.id, newTaskId: newTid };
     }
 
     // ---- team task

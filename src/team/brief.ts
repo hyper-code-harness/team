@@ -3,12 +3,13 @@
  *
  * The rules come from one place: the block between <!-- brief --> and <!-- /brief --> in the team plugin SKILL.md (estimate/progress, two-layer summary, result fields checked/notCovered/notDone/next/visuals, team.feed, team.post). Below them goes the current context from team.feed (read with all: true, so nobody's read cursor moves): «Сейчас работают», the last 5 entries and the feed cursor — the agent's first team.feed({ after: cursor }) then returns only what appeared after the brief, and later team.feed({}) calls go on from there. team.delegate appends this text to every task it hands out; an agent can also call it itself at the start of a task.
  *
- * Persona: when the agent is a session of a persona (team.persona_session / persona.current_agent_id), or opts.persona names one (team.delegate before the child exists), the brief starts with the persona block, capped at ~6000 characters: passport (name, role, responsibilities, model), persona prompt, the memory — table of contents of the persona's memos (team.memoSearch: path, title, description) and the full text of up to 3 memos most relevant to opts.query (the task title/text; ≤3500 characters together), the last 5 finished tasks of its sessions with the gist of the result and ★ rating, a line pointing to team.historySearch / team.sessionSearch / team.sessionRead (search own past tasks and old sessions), its plugins (2–3 lines from each SKILL.md and a plugins.read hint) and the rule that a hand-in (team.reportTask) needs at least one memo created or updated; then a line --- and the rules and feed as before. Right after the passport goes «Непрочитанные отзывы владельца»: owner ratings/comments from team.feedback_inbox (status queued or briefed — no live session got them) with the instruction to reflect them in memory first; listed rows become briefed, team.reportTask with a memo write marks them reflected.
+ * Persona: when the agent is a session of a persona (team.persona_session / persona.current_agent_id), or opts.persona names one (team.delegate before the child exists), the brief starts with the persona block, capped at ~6000 characters: passport (name, role, responsibilities, model), persona prompt, the memory — table of contents of the persona's memos (team.memoSearch: path, title, description) and the full text of up to 3 memos most relevant to opts.query (the task title/text; ≤3500 characters together), the last 5 finished tasks of its sessions with the gist of the result and ★ rating, a line pointing to team.historySearch / team.sessionSearch / team.sessionRead (search own past tasks and old sessions), its plugins (2–3 lines from each SKILL.md and a plugins.read hint) and the rule that a hand-in (team.reportTask) needs at least one memo created or updated; then a line --- and the rules and feed as before. The whole text never exceeds opts.maxChars (default 8000): rules and feed are kept, the persona block takes the remaining room and is cut with a «[бриф обрезан на N символов…]» mark (team.delegate/dispatch pass the room the task text leaves in the 12000 plan limit). Right after the passport goes «Непрочитанные отзывы владельца»: owner ratings/comments from team.feedback_inbox (status queued or briefed — no live session got them) with the instruction to reflect them in memory first; listed rows become briefed, team.reportTask with a memo write marks them reflected.
  * @param opts.persona Persona name to brief as, when the session does not exist yet.
  * @param opts.agentId Agent the brief is for; its parent is taken as the team manager for the feed. Default: the caller.
  * @param opts.taskId Task id the agent is about to work on; named in the brief so estimate/progress/post use it.
  * @param opts.managerAgentId Manager whose team feed to show. Default: parent of agentId, else agentId, else the caller's team.
  * @param opts.query Task title and text; picks which persona memos go into the brief in full.
+ * @param opts.maxChars Upper bound for the whole text; the persona block shrinks first, then the feed; a cut is marked «[бриф обрезан…]». @default 8000 @minimum 1500 @maximum 20000
  */
 export default async function (
     ctx: Context,
@@ -24,6 +25,8 @@ export default async function (
         managerAgentId?: string;
         /** Task title and text; picks which persona memos go into the brief in full. */
         query?: string;
+        /** Upper bound for the whole text; the persona block shrinks first, then the feed; a cut is marked «[бриф обрезан…]». @default 8000 @minimum 1500 @maximum 20000 */
+        maxChars?: number;
     },
 ): Promise<string> {
     const skillPath = import.meta.dir + '/../../SKILL.md';
@@ -41,8 +44,8 @@ export default async function (
         const r = await ctx.fns.procs.db.select({ sql: 'SELECT parent_id FROM agents WHERE id = ?', params: [agentId] }) as Array<Record<string, unknown>>;
         managerId = String(r[0]?.parent_id ?? '') || agentId;
     }
+    const maxChars = Math.max(1500, Math.min(20000, Number(opts.maxChars ?? 8000) || 8000));
     const lines: string[] = [];
-    if (agentId || opts.persona?.trim()) { try { const pb = await personaBlock(ctx, agentId, opts.persona?.trim() || '', String(opts.query ?? '')); if (pb) lines.push(pb, '', '---', ''); } catch (e) { lines.push(`(persona unavailable: ${String((e as Error)?.message ?? e).slice(0, 120)})`, ''); } }
     lines.push(rules);
     if (opts.taskId?.trim()) lines.push('', `Your task id: ${opts.taskId.trim()} — use it in team.estimate / team.progress / team.post / team.reportTask.`);
     try {
@@ -61,7 +64,21 @@ export default async function (
     } catch (e) {
         lines.push('', `(team.feed unavailable: ${String((e as Error)?.message ?? e).slice(0, 120)})`);
     }
-    return lines.join('\n');
+    // The rules and the feed are short and fixed; the persona block takes what is left of maxChars and says so when cut.
+    let tail = lines.join('\n');
+    const mark = (n: number) => `\n[бриф обрезан на ${n} символов — полный: team.brief({}) или team.personaGet / team.memoRead]`;
+    const keep = maxChars - (agentId || opts.persona?.trim() ? 400 : 120);
+    if (tail.length > keep) tail = tail.slice(0, keep) + mark(tail.length - keep);
+    let head = '';
+    if (agentId || opts.persona?.trim()) {
+        try {
+            const pb = await personaBlock(ctx, agentId, opts.persona?.trim() || '', String(opts.query ?? ''));
+            const room = maxChars - tail.length - 10;
+            if (pb && room >= 400) head = (pb.length > room - 120 ? pb.slice(0, room - 120) + mark(pb.length - (room - 120)) : pb) + '\n\n---\n\n';
+            else if (pb) head = 'Персона: бриф персоны не влез в лимит задачи — прочти его сам: team.brief({}), память — team.memoSearch({ query }).\n\n---\n\n';
+        } catch (e) { head = `(persona unavailable: ${String((e as Error)?.message ?? e).slice(0, 120)})\n\n`; }
+    }
+    return (head + tail).slice(0, maxChars);
 }
 
 /** Persona part of the brief, capped at ~6000 characters: passport, prompt, notes, last 5 tasks with result and stars, plugins. */

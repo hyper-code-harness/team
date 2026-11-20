@@ -38,7 +38,7 @@ export default async function (
 ): Promise<{ status: 'none' | 'duplicate' | 'sent' | 'queued'; persona: string | null; inboxId: string | null; to: string | null }> {
     type Row = Record<string, any>;
     const actor = await ctx.fns.team.resolveActor({});
-    if (actor.kind !== 'user') throw new Error('team.reflect: owner feedback comes from the signed-in person');
+    if (actor.kind !== 'user') throw new Error('team.reflect: owner feedback comes from the signed-in person — Агент: оценку/отзыв ставит только человек на /team/; работу дай через team.delegate({agent, persona, title, human, details}); команду и персону агент сессии человека создаёт сам (team.create, team.personaCreate)');
     const kind = opts.kind === 'comment' ? 'comment' : 'rating';
     const taskId = String(opts.taskId ?? '').trim(); const refAgent = String(opts.agentId ?? '').trim();
     const assignee = String(opts.assigneeAgentId ?? '').trim();

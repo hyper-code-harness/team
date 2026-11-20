@@ -2,6 +2,8 @@
  * List teams visible to the injected owner or roster member
  *
  * Use to discover persistent teams before opening a passport. Human users see only their owned teams; agents see only teams whose roster contains their identity. No actor override is accepted.
+ *
+ * Empty result is normal for an agent that is not on any roster: it does not mean teams are missing. An agent whose session belongs to a person may create teams and personas for that person (team.create, team.personaCreate; recorded on_behalf_of); ratings stay with the person on /team/. To get work done call team.delegate({agent, persona, title, human, details}). The return stays a plain array (no hint field) because the dashboard, feed, room and personas filter it directly.
  */
 export default async function (
     ctx: Context,

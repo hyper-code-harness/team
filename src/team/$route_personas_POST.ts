@@ -20,7 +20,9 @@ export default async function(ctx:Context,session:Session|null,opts:{req:Request
   const from=get('iconFrom');
   if(from) { const r=await ctx.fns.procs.db.select({sql:'SELECT icon FROM agents WHERE id=?',params:[from]}) as Array<Record<string,any>>; if(r[0]?.icon) icon=String(r[0].icon); }
   const responsibilities=get('responsibilities'), model=get('model'), prompt=String(f.get('prompt')??'').replace(/\r\n/g,'\n').trim();
-  const c=await ctx.fns.team.personaCreate({name,role,...(responsibilities?{responsibilities}:{}),...(icon?{icon}:{}),...(prompt?{prompt}:{}),...(plugins.length?{plugins}:{}),...(model?{model}:{})});
+  const scope=get('scope'), projectId=get('projectId');
+  const lv:Record<string,string>={}; if(scope==='system'||scope==='project') { lv.scope=scope; if(scope==='project'&&projectId) lv.projectId=projectId; }
+  const c=await (ctx.fns.team.personaCreate as (o:Record<string,unknown>)=>ReturnType<typeof ctx.fns.team.personaCreate>)({...lv,name,role,...(responsibilities?{responsibilities}:{}),...(icon?{icon}:{}),...(prompt?{prompt}:{}),...(plugins.length?{plugins}:{}),...(model?{model}:{})});
   if(!c.created) throw new Error('персона «'+name+'» уже есть');
   notice='Создана «'+c.name+'».';
   const teamId=get('teamId');

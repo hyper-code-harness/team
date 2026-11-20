@@ -1,7 +1,7 @@
 /**
  * Commit a versioned team command with its public event and notification outbox.
  *
- * Use for owner lifecycle, supervisor board management, assignee transitions and public communication. Serializes on the team row, enforces injected actor permissions, CAS and successful-command replay before atomically writing team-only storage.
+ * Use for owner lifecycle (also by an agent of the owner's own session for roster commands, recorded on_behalf_of), supervisor board management, assignee transitions and public communication. Serializes on the team row, enforces injected actor permissions, CAS and successful-command replay before atomically writing team-only storage.
  * @param opts.teamId Team identifier.
  * @param opts.requestKey Unique intent key; reuse only for exact retries.
  * @param opts.expectedVersion Task version for assign, reorder or transition; team version for other commands (including preempt). @minimum 1
@@ -31,7 +31,11 @@ export default async function (
      const team = rows[0]; if(!team) throw new Error('Team not found');
      // Departed members (left_at set) keep their row for history and FKs but lose all roster rights.
      const members = (await ctx.fns.procs.db.select({sql:'SELECT * FROM team.member WHERE team_id=? ORDER BY agent_id',params:[opts.teamId]})).filter(m=>m.left_at==null);
-     const owner = actor.kind==='user' && actor.id===team.owner_user_id;
+     // Roster commands may also come from an agent of the owner's own session (not on the roster, or the team's creator): recorded on_behalf_of the owner.
+     const rosterCmd = ['activate','archive','retryDelivery','memberHire','memberFire','personaJoin','personaBind','personaLeave'].includes(opts.command?.action);
+     let onBehalfOf: string|null = null;
+     if(actor.kind==='agent' && rosterCmd) { try { const o=await ctx.fns.team.resolveOwnerActor({teamId:opts.teamId}); if(o.teamOwner) onBehalfOf=o.ownerId; } catch {} }
+     const owner = (actor.kind==='user' && actor.id===team.owner_user_id) || onBehalfOf!==null;
      const member = actor.kind==='agent' && members.some(m=>m.agent_id===actor.id);
      if(!owner && !member) throw new Error('Team access denied');
      const supervisor = member && actor.id===team.supervisor_agent_id;
@@ -58,6 +62,8 @@ export default async function (
      switch(c.action) {
      case 'activate': {
       requireOwner(); if(team.status!=='draft') throw new Error('Activation requires draft'); requireMember(team.supervisor_agent_id);
+      // The maintenance cron grant binds an authenticated HTTP owner; an agent cannot set it up — it must already exist.
+      if(onBehalfOf) { const g=await ctx.fns.procs.db.select({sql:"SELECT 1 FROM information_schema.tables WHERE table_name='cron_grants'"}); const ok=g.length&&(await ctx.fns.procs.db.select({sql:'SELECT 1 FROM cron_grants WHERE task_name=?',params:['team-maintenance:'+onBehalfOf]})).length; if(!ok) throw new Error('Активацию с cron grant (team-maintenance:'+onBehalfOf+') делает человек на /team/ — у агента нет HTTP-сессии владельца для cron.grant. После первой активации человеком агент активирует следующие команды сам.'); }
       await ctx.fns.procs.db.run({sql:'UPDATE team.member SET active=true WHERE team_id=?',params:[opts.teamId]});
       await ctx.fns.procs.db.run({sql:"UPDATE team.team SET status='active',version=version+1 WHERE id=?",params:[opts.teamId]});
       recipients=members.map(m=>String(m.agent_id));
@@ -197,7 +203,9 @@ export default async function (
       extra={returned}; break;
      }
      case 'personaJoin': {
-      requireManager(); const name=String(c.name??'').trim(); if(!name) throw new Error('personaJoin: name required');
+      requireManager(); const asked=String(c.name??'').trim(); if(!asked) throw new Error('personaJoin: name required');
+      // Display name or storage key → storage key; a project persona of another project throws «persona X belongs to project Y».
+      const name=(await ctx.fns.team.personaResolve({name:asked}))?.name ?? asked;
       const p=(await ctx.fns.procs.db.select({sql:'SELECT name,owner_user_id,role FROM team.persona WHERE name=?',params:[name]}))[0];
       if(!p||String(p.owner_user_id)!==String(team.owner_user_id)) throw new Error('personaJoin: no persona '+name+' of the team owner');
       const cur=(await ctx.fns.procs.db.select({sql:'SELECT active FROM team.team_persona WHERE team_id=? AND persona_name=?',params:[opts.teamId,name]}))[0];
@@ -246,10 +254,11 @@ export default async function (
      if(['taskCreate','taskAssign','taskReorder','preempt','taskTransition','memberHire','memberFire','personaJoin','personaBind','personaLeave'].includes(c.action)) await ctx.fns.procs.db.run({sql:'UPDATE team.team SET version=version+1 WHERE id=?',params:[opts.teamId]});
      const seqs=await ctx.fns.procs.db.select({sql:'UPDATE team.team SET next_seq=next_seq+1 WHERE id=? RETURNING next_seq,version,status',params:[opts.teamId]});
      const seq=Number(seqs[0].next_seq);
-     await ctx.fns.procs.db.run({sql:'INSERT INTO team.event(id,team_id,seq,task_id,actor_kind,actor_id,kind,text,payload,causation_id,command_key,timestamp) VALUES(?,?,?,?,?,?,?,?,?::jsonb,?,?,?)',params:[eventId,opts.teamId,seq,taskId,actor.kind,actor.id,kind,text,JSON.stringify({command:c,task,...(paused?{paused}:{}),...extra,...(report?{report}:{})}),c.action==='say'?c.replyTo??null:null,opts.requestKey,now]});
+     const ob=onBehalfOf?',on_behalf_of':'', obv=onBehalfOf?',?':'', obp=onBehalfOf?[onBehalfOf]:[];
+     await ctx.fns.procs.db.run({sql:'INSERT INTO team.event(id,team_id,seq,task_id,actor_kind,actor_id,kind,text,payload,causation_id,command_key,timestamp'+ob+') VALUES(?,?,?,?,?,?,?,?,?::jsonb,?,?,?'+obv+')',params:[eventId,opts.teamId,seq,taskId,actor.kind,actor.id,kind,text,JSON.stringify({command:c,task,...(paused?{paused}:{}),...extra,...(report?{report}:{})}),c.action==='say'?c.replyTo??null:null,opts.requestKey,now,...obp]});
      for(const recipient of [...new Set(recipients)].filter(id=>c.action!=='say'||!(actor.kind==='agent'&&id===actor.id))) await ctx.fns.procs.db.run({sql:'INSERT INTO team.delivery(id,team_id,event_id,recipient_agent_id,next_at) VALUES(?,?,?,?,?)',params:[Bun.randomUUIDv7(),opts.teamId,eventId,recipient,now]});
      const result:Record<string,unknown>={teamId:opts.teamId,eventId,seq,teamVersion:Number(seqs[0].version),status:seqs[0].status,task,...(paused?{paused}:{}),...extra};
-     await ctx.fns.procs.db.run({sql:'INSERT INTO team.command(team_id,actor_kind,actor_id,request_key,payload_hash,result) VALUES(?,?,?,?,?,?::jsonb)',params:[opts.teamId,actor.kind,actor.id,opts.requestKey,hash,JSON.stringify(result)]});
+     await ctx.fns.procs.db.run({sql:'INSERT INTO team.command(team_id,actor_kind,actor_id,request_key,payload_hash,result'+ob+') VALUES(?,?,?,?,?,?::jsonb'+obv+')',params:[opts.teamId,actor.kind,actor.id,opts.requestKey,hash,JSON.stringify(result),...obp]});
      committed=true; return result;
     }}) as Record<string,unknown>;
     if(!committed) return out; // exact replay: no refresh, no second interrupt

@@ -1,7 +1,7 @@
 /**
  * The owner's review of a handed-in task: 1–5 stars and an optional comment, sent in one action; the executor then decides — close or rework
  *
- * Owner (signed-in person) only. Team task (status review or done) or delegated child plan task (agentId, status done). Stores the rating in team.rating (agent_id '' for team tasks; rating again replaces it — re-rating a closed task just updates the stars) and does NOT close the task: team.reflect sends the stars and comment as ONE message to the executor persona's live session, which reads it and either reworks (team.rework → back in work, same session) or reflects into memory and closes (team.close → final accept on the owner's behalf; its last task closed → the session leaves without an extra turn). Executor session archived (or no session, or not a persona so nobody gets the message to decide) and the task still open: closed at once on the owner's behalf (`closed: true`) and the feedback is queued for the persona's next brief — to get more work done after that, return it with a comment (team.reopen → new session of the persona). Shows as kind 'rating' in team.feed and the task history; refreshes the 'team' live topic.
+ * Owner (signed-in person) only; a person's team.accept with stars is this same call (the manager agent's team.accept is only the first pass and never closes). Team task (status review or done) or delegated child plan task (agentId, status done). Stores the rating in team.rating (agent_id '' for team tasks; rating again replaces it — re-rating a closed task just updates the stars) and does NOT close the task: team.reflect sends the stars and comment as ONE message to the executor persona's live session, which reads it and either reworks (team.rework → back in work, same session) or reflects into memory and closes (team.close → final accept on the owner's behalf; its last task closed → the session leaves without an extra turn). Executor session archived (or no session, or not a persona so nobody gets the message to decide) and the task still open: closed at once on the owner's behalf (`closed: true`) and the feedback is queued for the persona's next brief — to get more work done after that, return it with a comment (team.reopen → new session of the persona). Shows as kind 'rating' in team.feed and the task history; refreshes the 'team' live topic.
  * @param opts.taskId Team task id, or plan task id when agentId is given.
  * @param opts.agentId Delegated child whose plan holds the task.
  * @param opts.stars Rating from 1 to 5. @minimum 1 @maximum 5
@@ -23,7 +23,7 @@ export default async function (
 ): Promise<{stars:number; comment:string; assigneeAgentId:string; at:number; closed:boolean; reflect:unknown}> {
     type Row = Record<string, any>;
     const actor = await ctx.fns.team.resolveActor({});
-    if (actor.kind !== 'user') throw new Error('Rating is given on behalf of the signed-in person');
+    if (actor.kind !== 'user') throw new Error('Rating is given on behalf of the signed-in person — Агент: оценку/отзыв ставит только человек на /team/; работу дай через team.delegate({agent, persona, title, human, details}); команду и персону агент сессии человека создаёт сам (team.create, team.personaCreate)');
     const taskId = String(opts.taskId ?? '').trim(); const agentId = String(opts.agentId ?? '').trim();
     const stars = Number(opts.stars);
     if (!taskId) throw new Error('taskId required');

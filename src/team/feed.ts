@@ -11,6 +11,7 @@
  * @param opts.after Cursor from a previous result (or team.brief): only entries after it, oldest first.
  * @param opts.unread true: only entries after the stored cursor (default for an agent caller); false: the whole feed.
  * @param opts.all The whole feed newest first, the stored cursor is not moved (the board reads this way).
+ * @param opts.teamIds Only these team-plugin teams (team.team ids) instead of every team the caller can read; the board of a team or project passes them.
  */
 export default async function (
     ctx: Context,
@@ -30,6 +31,8 @@ export default async function (
         unread?: boolean;
         /** The whole feed newest first, the stored cursor is not moved (the board reads this way). */
         all?: boolean;
+        /** Only these team-plugin teams (team.team ids) instead of every team the caller can read; the board of a team or project passes them. */
+        teamIds?: string[];
     },
 ): Promise<{
     managerAgentId: string | null;
@@ -58,7 +61,8 @@ export default async function (
     }
 
     // ---- team-plugin teams the caller can read
-    const teams = (await ctx.fns.team.list({})).filter(t => t.status !== 'archived');
+    const only = Array.isArray(opts.teamIds) ? new Set(opts.teamIds.map(String)) : null;
+    const teams = (await ctx.fns.team.list({})).filter(t => t.status !== 'archived' && (!only || only.has(t.id)));
     const allTasks: Row[] = []; const teamIds: string[] = [];
     for (const t of teams) {
         try { const g = await ctx.fns.team.get({ teamId: t.id }); teamIds.push(String(g.team.id)); allTasks.push(...g.tasks); }
@@ -87,7 +91,7 @@ export default async function (
 
     // ---- shared notes: authored by the team, tied to its teams, or by a person; missing table = no posts yet
     let posts: Row[] = [];
-    const anyScope = agentIds.length > 0 || teamIds.length > 0; // no team at all: every post (person's board without a manager)
+    const anyScope = agentIds.length > 0 || teamIds.length > 0 || only !== null; // a scoped board (teamIds given) never falls back to everything // no team at all: every post (person's board without a manager)
     try { posts = await ctx.fns.procs.db.select({ sql: `SELECT id, author_kind, author_id, team_id, task_id, kind, text, created_at FROM team.post${anyScope ? " WHERE author_kind <> 'agent' OR author_id = ANY(?::text[]) OR team_id = ANY(?::text[])" : ''} ORDER BY created_at DESC LIMIT 30`, params: anyScope ? [agentIds, teamIds] : [] }) as Row[]; }
     catch (e) { if (!/team\.post|does not exist/.test(String(e))) throw e; }
 

@@ -40,7 +40,8 @@ export default async function (
     }
     const teams=await ctx.fns.procs.db.select({sql:'SELECT * FROM team.team WHERE id=?',params:[opts.teamId]});
     const team=teams[0]; if(!team) throw new Error('Team not found');
-    if(!((actor.kind==='user'&&actor.id===team.owner_user_id)||(actor.kind==='agent'&&actor.id===team.supervisor_agent_id))) throw new Error('Supervisor or owner required');
+    const ownerAgent=actor.kind==='agent'&&actor.id!==team.supervisor_agent_id?await ctx.fns.team.resolveOwnerActor({teamId:opts.teamId}).then(o=>!!o.teamOwner,()=>false):false;
+    if(!((actor.kind==='user'&&actor.id===team.owner_user_id)||(actor.kind==='agent'&&actor.id===team.supervisor_agent_id)||ownerAgent)) throw new Error('Supervisor or owner required (or an agent of the owner\'s own session that is not on the roster)');
     if(team.status!=='active') throw new Error('Team not active');
     const p=opts.persona; if(!p?.name?.trim()||!p?.role?.trim()) throw new Error('persona.name and persona.role required');
     const supervisor=await ctx.fns.session.load({id:String(team.supervisor_agent_id)});

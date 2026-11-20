@@ -371,6 +371,7 @@ test('team.rate → persona reflects: live session gets a message, repeat dedups
 
 const hostSetup = async () => {
   await query({ sql: "CREATE TABLE IF NOT EXISTS agents (id text PRIMARY KEY, parent_id text, archived_at bigint, run_state text, scratchpad jsonb, meta jsonb, created_at bigint)" });
+  await query({ sql: 'ALTER TABLE agents ADD COLUMN IF NOT EXISTS project_id text, ADD COLUMN IF NOT EXISTS icon text' });
   await query({ sql: "CREATE TABLE IF NOT EXISTS cron_tasks (name text PRIMARY KEY, fn text, args jsonb, enabled boolean DEFAULT true)" });
   const raw = { fns: { procs: { db: { exec: ({ sql: text }: any) => sql.unsafe(text) } } } };
   for (const k of Object.keys(runtime).filter(k => k.startsWith('$migration_') && k > '$migration_20291020000100_team_queue').sort()) await runtime[k].up(raw);
@@ -487,4 +488,350 @@ test('rate of an archived session’s open task → closed at once, feedback que
   await tr({ action: 'start' }, 1); await tr({ action: 'submit', summary: 'Done', artifacts: [], verification: 'x', report: { summary: 'ok' } }, 2);
   const q = await human(() => ctx.fns.team.rate({ taskId: t3, stars: 4 }));
   expect(q.closed).toBe(true); expect(await status(t3)).toBe('done');
+});
+test('agent of the owner session creates team and persona on behalf of the owner; foreign agent refused; rate stays person-only', async () => {
+  await hostSetup();
+  const me = `own-agent-${++serial}`; const tid = `onbehalf-${serial}`;
+  const roster = [`${tid}-sup`, `${tid}-w`];
+  const create = { teamId: tid, requestKey: 'create', title: 'Agent team', goal: 'On behalf', supervisorAgentId: roster[0], members: roster.map(agentId => ({ agentId, role: 'member', responsibilities: 'Test' })) };
+  const made = await member(me, () => ctx.fns.team.create(create));
+  expect(made).toMatchObject({ teamId: tid, status: 'draft' });
+  expect(await member(me, () => ctx.fns.team.create(create))).toEqual(made); // requestKey replay
+  await expect(member(me, () => ctx.fns.team.create({ ...create, goal: 'Changed' }))).rejects.toThrow();
+  expect((await query({ sql: 'SELECT owner_user_id FROM team.team WHERE id=?', params: [tid] }))[0].owner_user_id).toBe('owner');
+  expect((await query({ sql: "SELECT actor_kind, actor_id, on_behalf_of FROM team.event WHERE team_id=? AND seq=1", params: [tid] }))[0]).toEqual({ actor_kind: 'agent', actor_id: me, on_behalf_of: 'owner' });
+  expect((await query({ sql: "SELECT on_behalf_of FROM team.command WHERE team_id=? AND actor_kind='agent' AND actor_id=?", params: [tid, me] }))[0].on_behalf_of).toBe('owner');
+  // activation needs the owner-scoped cron grant: the agent cannot set it up
+  await expect(member(me, () => ctx.fns.team.executeCommand({ teamId: tid, requestKey: 'act', expectedVersion: 1, command: { action: 'activate' } }))).rejects.toThrow(/делает человек на \/team\//);
+  await query({ sql: 'CREATE TABLE IF NOT EXISTS cron_grants (task_name text PRIMARY KEY, owner_id text)' });
+  await query({ sql: "INSERT INTO cron_grants(task_name, owner_id) VALUES ('team-maintenance:owner', 'owner') ON CONFLICT DO NOTHING" });
+  const act = await member(me, () => ctx.fns.team.executeCommand({ teamId: tid, requestKey: 'act', expectedVersion: 1, command: { action: 'activate' } }));
+  expect(act.status).toBe('active');
+  expect((await query({ sql: "SELECT on_behalf_of FROM team.event WHERE id=?", params: [act.eventId] }))[0].on_behalf_of).toBe('owner');
+  // a roster member (not the creator) keeps member rights only; a foreign person's agent is refused
+  await expect(member(roster[1], () => ctx.fns.team.executeCommand({ teamId: tid, requestKey: 'arch', expectedVersion: 2, command: { action: 'archive' } }))).rejects.toThrow('Owner required');
+  await expect(member('foreign', () => ctx.fns.team.executeCommand({ teamId: tid, requestKey: 'arch', expectedVersion: 2, command: { action: 'archive' } }))).rejects.toThrow('Team access denied');
+  await expect(member('foreign', () => ctx.fns.team.create({ ...create, teamId: `${tid}-f` }))).rejects.toThrow();
+  // persona on behalf of the owner
+  const pn = `Агентская-${serial}`;
+  expect(await member(me, () => ctx.fns.team.personaCreate({ name: pn, role: 'r' }))).toMatchObject({ name: pn, created: true });
+  expect((await query({ sql: 'SELECT owner_user_id FROM team.persona WHERE name=?', params: [pn] }))[0].owner_user_id).toBe('owner');
+  expect((await query({ sql: "SELECT author_kind, author_id, on_behalf_of FROM team.persona_rev WHERE persona_name=? AND field='card'", params: [pn] }))[0]).toEqual({ author_kind: 'agent', author_id: me, on_behalf_of: 'owner' });
+  expect((await member(me, () => ctx.fns.team.personaCreate({ name: pn, role: 'r' }))).created).toBe(false);
+  await expect(member('foreign', () => ctx.fns.team.personaCreate({ name: `${pn}-f`, role: 'r' }))).resolves.toMatchObject({ created: true }); // foreign agent creates only for its own person
+  expect((await query({ sql: 'SELECT owner_user_id FROM team.persona WHERE name=?', params: [`${pn}-f`] }))[0].owner_user_id).toBe('someone-else');
+  // rating and feedback stay with the signed-in person
+  await expect(member(me, () => ctx.fns.team.rate({ taskId: 'nope', stars: 5 }))).rejects.toThrow('signed-in person');
+  await expect(member(me, () => ctx.fns.team.feedback({ taskId: 'nope', text: 'x' }))).rejects.toThrow(/только человек/);
+});
+
+test('byss bugs: create with personas and members:[] → supervisor on the roster; memoSave by the owner agent → on_behalf_of; foreign agent and other project refused', async () => {
+  await hostSetup();
+  await query({ sql: 'ALTER TABLE agents ADD COLUMN IF NOT EXISTS project_id text' });
+  await query({ sql: 'ALTER TABLE team.persona ADD COLUMN IF NOT EXISTS project_id text' });
+  const s = ++serial, me = `byss-${s}`, now = Date.now();
+  await query({ sql: "INSERT INTO agents(id, project_id, created_at) VALUES (?, 'pr', ?) ON CONFLICT (id) DO UPDATE SET project_id='pr'", params: [me, now] });
+  // (1) personas + empty members: the calling agent is the supervisor and the only member
+  const tid = `byss-team-${s}`, pn = `Бисс-${s}`;
+  const made = await member(me, () => ctx.fns.team.create({ teamId: tid, requestKey: 'c', title: 'T', goal: 'G', members: [], personas: [{ name: pn, role: 'r' }] }));
+  expect(made).toMatchObject({ teamId: tid, status: 'draft' });
+  expect((await query({ sql: 'SELECT agent_id, role FROM team.member WHERE team_id=?', params: [tid] }))).toEqual([{ agent_id: me, role: 'supervisor' }]);
+  expect((await query({ sql: 'SELECT supervisor_agent_id FROM team.team WHERE id=?', params: [tid] }))[0].supervisor_agent_id).toBe(me);
+  // explicit supervisor, members omitted
+  const sup = `${me}-sup`;
+  await member(me, () => ctx.fns.team.create({ teamId: `${tid}-b`, requestKey: 'c', title: 'T', goal: 'G', supervisorAgentId: sup, personas: [{ name: pn, role: 'r' }] }));
+  expect((await query({ sql: 'SELECT agent_id FROM team.member WHERE team_id=?', params: [`${tid}-b`] })).map((r: any) => r.agent_id)).toEqual([sup]);
+  // a person without members and supervisor gets a hint
+  await expect(human(() => ctx.fns.team.create({ teamId: `${tid}-h`, requestKey: 'c', title: 'T', goal: 'G', personas: [{ name: pn, role: 'r' }] }))).rejects.toThrow(/supervisorAgentId/);
+  // (2) memoSave by the owner's agent (not a persona session) → ok, on_behalf_of owner
+  const key = String((await query({ sql: 'SELECT name FROM team.persona WHERE display_name=? OR name=?', params: [pn, pn] }))[0].name);
+  const saved = await member(me, () => ctx.fns.team.memoSave({ name: key, path: 'code/x.md', title: 'X', content: 'hello' }));
+  expect(saved).toMatchObject({ changed: true, created: true });
+  expect((await query({ sql: "SELECT author_kind, author_id, on_behalf_of FROM team.persona_rev WHERE id=?", params: [saved.revisionId] }))[0]).toEqual({ author_kind: 'agent', author_id: me, on_behalf_of: 'owner' });
+  expect((await member(me, () => ctx.fns.team.memoDelete({ name: key, path: 'code/x.md' }))).changed).toBe(true);
+  // a foreign person's agent is refused
+  await expect(member('foreign', () => ctx.fns.team.memoSave({ name: key, path: 'code/y.md', title: 'Y', content: 'no' }))).rejects.toThrow(/only the owner/);
+  // project visibility stays: a project-b persona is closed to the owner's agent of project r
+  const pb = `БиссБ-${s}`;
+  await query({ sql: "INSERT INTO team.persona(name, owner_user_id, scope, project_id, created_at, updated_at) VALUES (?, 'owner', 'project', 'pb', ?, ?)", params: [pb, now, now] });
+  await expect(member(me, () => ctx.fns.team.memoSave({ name: pb, path: 'code/z.md', title: 'Z', content: 'no' }))).rejects.toThrow(/belongs to project pb/);
+});
+
+test('team.delegate without tasks → unique plan taskId per child; manager accept works by it', async () => {
+  await hostSetup();
+  const mgr = `deleg-mgr-${++serial}`; let n = 0;
+  const realBrief = runtime.brief; runtime.brief = async () => '(brief)';
+  ctx.fns.agent.delegate = async (o: any) => {
+    const id = `${mgr}-c${++n}`;
+    await query({ sql: "INSERT INTO agents(id, parent_id, scratchpad, created_at) VALUES (?, ?, ?::jsonb, ?)", params: [id, o.agent.id, JSON.stringify({ plan: { tasks: o.tasks.map((t: any) => ({ ...t, status: 'done' })) } }), Date.now()] });
+    return { id, status: 'queued' };
+  };
+  const a = await member(mgr, () => ctx.fns.team.delegate({ agent: { id: mgr }, title: 'Same title', human: 'Do it.' }));
+  const b = await member(mgr, () => ctx.fns.team.delegate({ agent: { id: mgr }, title: 'Same title', human: 'Do it.' }));
+  expect(a.taskId).toMatch(/^same-title-/); expect(b.taskId).toMatch(/^same-title-/);
+  expect(a.taskId).not.toBe('task'); expect(a.taskId).not.toBe(b.taskId);
+  for (const d of [a, b]) {
+    const r = await member(mgr, () => ctx.fns.team.accept({ agentId: d.id, taskId: d.taskId }));
+    expect(r).toMatchObject({ kind: 'child', accepted: true, by: 'manager:' + mgr });
+  }
+  // legacy rows with the literal 'task' keep working
+  await query({ sql: "INSERT INTO agents(id, parent_id, scratchpad, created_at) VALUES (?, ?, ?::jsonb, ?)", params: [`${mgr}-old`, mgr, JSON.stringify({ plan: { tasks: [{ id: 'task', title: 'x', status: 'done' }] } }), Date.now()] });
+  expect(await member(mgr, () => ctx.fns.team.accept({ agentId: `${mgr}-old`, taskId: 'task' }))).toMatchObject({ accepted: true });
+  runtime.brief = realBrief;
+});
+
+test('team.delegate: child joins the manager project; a project persona brings its own project', async () => {
+  await hostSetup();
+  await query({ sql: "ALTER TABLE team.persona ADD COLUMN IF NOT EXISTS scope text NOT NULL DEFAULT 'system'" });
+  await query({ sql: 'ALTER TABLE team.persona ADD COLUMN IF NOT EXISTS project_id text' });
+  const mgr = `proj-mgr-${++serial}`; let n = 0; const now = Date.now();
+  await query({ sql: "INSERT INTO agents(id, project_id, created_at) VALUES (?, 'pm', ?)", params: [mgr, now] });
+  const realBrief = runtime.brief; runtime.brief = async () => '(brief)';
+  const assigned: any[] = [];
+  ctx.fns.project = { assign: async (o: any) => { assigned.push(o); await query({ sql: 'UPDATE agents SET project_id=? WHERE id=?', params: [o.project, o.agentId] }); return { agentId: o.agentId, projectId: o.project, workspace: null }; } };
+  ctx.fns.chat = { setIcon: async () => ({}) }; ctx.fns.events = { refreshAgentMeta: async () => ({}) };
+  ctx.fns.agent.delegate = async (o: any) => {
+    const id = `${mgr}-c${++n}`;
+    await query({ sql: "INSERT INTO agents(id, parent_id, scratchpad, created_at) VALUES (?, ?, ?::jsonb, ?)", params: [id, o.agent.id, JSON.stringify({ plan: { tasks: o.tasks } }), Date.now()] });
+    return { id, status: 'working' };
+  };
+  const pp = `ProjP-${serial}`;
+  await query({ sql: "INSERT INTO team.persona(name, owner_user_id, scope, project_id, created_at, updated_at) VALUES (?, 'owner', 'project', 'pb', ?, ?)", params: [pp, now, now] });
+  const plain = await member(mgr, () => ctx.fns.team.delegate({ agent: { id: mgr }, title: 'Plain', human: 'Do it.' }));
+  // a project persona is visible only from its own project (or from a manager without a project) and brings that project
+  await expect(member(mgr, () => ctx.fns.team.delegate({ agent: { id: mgr }, title: 'Persona', human: 'Do it.', persona: pp }))).rejects.toThrow(`persona ${pp} belongs to project pb`);
+  const free = `proj-free-${serial}`; await query({ sql: 'INSERT INTO agents(id, created_at) VALUES (?, ?)', params: [free, now] });
+  const withP = await member(free, () => ctx.fns.team.delegate({ agent: { id: free }, title: 'Persona', human: 'Do it.', persona: pp }));
+  expect(plain.projectId).toBe('pm'); expect(withP.projectId).toBe('pb');
+  expect(assigned.every(a => a.keepWorkspace === true)).toBe(true);
+  const rows = await query({ sql: 'SELECT id, project_id FROM agents WHERE id IN (?, ?) ORDER BY id', params: [plain.id, withP.id] });
+  expect(rows.map((r: any) => r.project_id)).toEqual(['pm', 'pb']);
+  // no project anywhere → no assign
+  const lone = `proj-lone-${serial}`; assigned.length = 0;
+  const l = await member(lone, () => ctx.fns.team.delegate({ agent: { id: lone }, title: 'Lone', human: 'Do it.' }));
+  expect(l.projectId).toBeUndefined(); expect(assigned).toEqual([]);
+  runtime.brief = realBrief;
+});
+
+test('team.ratings: by persona (all sessions in one row) and by session; agent default = own team, scope all = everything; person = all', async () => {
+  await hostSetup();
+  const mgr = `rt-mgr-${crypto.randomUUID().slice(0, 6)}`, other = `${mgr}-other`;
+  const s1 = `${mgr}-s1`, s2 = `${mgr}-s2`, outsider = `${other}-x`, pname = `Рейтинг-${mgr}`;
+  const now = Date.now();
+  for (const [id, parent] of [[mgr, null], [s1, mgr], [s2, other], [other, null], [outsider, other]]) await query({ sql: 'INSERT INTO agents(id, parent_id, created_at) VALUES (?, ?, ?)', params: [id, parent, now] });
+  await query({ sql: "INSERT INTO team.persona(name, owner_user_id, current_agent_id, created_at, updated_at) VALUES (?, 'owner', ?, ?, ?)", params: [pname, s1, now, now] });
+  await query({ sql: 'INSERT INTO team.persona_session(agent_id, persona_name, started_at) VALUES (?, ?, ?), (?, ?, ?)', params: [s1, pname, now, s2, pname, now - 1000] });
+  const rate = (child: string, task: string, stars: number, comment: string, at: number) => query({ sql: "INSERT INTO team.rating(agent_id, task_id, assignee_agent_id, stars, comment, rated_by, rated_at) VALUES (?, ?, ?, ?, ?, 'owner', ?)", params: [child, task, child, stars, comment, at] });
+  await rate(s1, 'a', 5, 'отлично', now); await rate(s2, 'b', 3, 'медленно', now - 500); await rate(outsider, 'c', 1, 'чужой', now);
+  // persona filter: both sessions in one row, latest comment first
+  const byP = await member(mgr, () => ctx.fns.team.ratings({ persona: pname }));
+  expect(byP.scope).toBe('filter');
+  expect(byP.personas).toHaveLength(1);
+  expect(byP.personas[0]).toMatchObject({ persona: pname, count: 2, avg: 4 });
+  expect(byP.personas[0].agentIds.sort()).toEqual([s1, s2].sort());
+  expect(byP.personas[0].recent.map((r: any) => r.comment)).toEqual(['отлично', 'медленно']);
+  // agent default: own team (child s1 → its persona, incl. s2 of another manager); outsider hidden
+  const mine = await member(mgr, () => ctx.fns.team.ratings({}));
+  expect(mine.scope).toBe('team');
+  expect(mine.personas.map((p: any) => p.persona)).toEqual([pname]);
+  // a child sees its manager's team too (siblings)
+  expect((await member(s1, () => ctx.fns.team.ratings({}))).personas.map((p: any) => p.persona)).toEqual([pname]);
+  // by session: one row per agent, persona named
+  const bySess = await member(mgr, () => ctx.fns.team.ratings({ groupBy: 'session' }));
+  expect(bySess.agents.map((a: any) => a.agentId).sort()).toEqual([s1, s2].sort());
+  expect(bySess.agents.every((a: any) => a.persona === pname)).toBe(true);
+  // scope all / person: everything, outsider without persona gets persona null
+  const all = await member(mgr, () => ctx.fns.team.ratings({ scope: 'all' }));
+  expect(all.personas.find((p: any) => p.persona === null && p.agentIds[0] === outsider)).toMatchObject({ count: 1, avg: 1 });
+  const person = await human(() => ctx.fns.team.ratings({}));
+  expect(person.scope).toBe('all');
+  expect(person.personas.some((p: any) => p.agentIds.includes(outsider))).toBe(true);
+  // agentId filter keeps working (persona page)
+  expect((await human(() => ctx.fns.team.ratings({ agentId: s2, groupBy: 'session' }))).agents).toMatchObject([{ agentId: s2, count: 1, avg: 3 }]);
+  await expect(member(mgr, () => ctx.fns.team.ratings({ scope: 'x' as any }))).rejects.toThrow('scope');
+});
+
+test('team.inspect: agent sees its project, personas (lengths only), team roster, task counts, rights and next hints', async () => {
+  await hostSetup();
+  await query({ sql: 'ALTER TABLE agents ADD COLUMN IF NOT EXISTS created_by text' });
+  await query({ sql: 'ALTER TABLE agents ADD COLUMN IF NOT EXISTS project_id text' });
+  await query({ sql: 'CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY, title text)' });
+  await query({ sql: "INSERT INTO projects(id, title) VALUES ('insp', 'Inspect project') ON CONFLICT DO NOTHING" });
+  const { f, worker, pname } = await personaFixture('insp');
+  await query({ sql: "UPDATE agents SET created_by='owner', project_id='insp', meta=?::jsonb WHERE id=?", params: [JSON.stringify({ persona: { name: pname } }), worker] });
+  await query({ sql: "INSERT INTO agents(id, created_by, project_id, created_at) VALUES (?, 'owner', 'insp', ?) ON CONFLICT (id) DO UPDATE SET project_id='insp'", params: [f.roster[0], Date.now()] });
+  await query({ sql: "UPDATE team.persona SET prompt='long secret prompt', role='ресерч' WHERE name=?", params: [pname] });
+  await query({ sql: 'INSERT INTO team.team_persona(team_id, persona_name, joined_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', params: [f.id, pname, Date.now()] });
+  await f.add(`${f.id}-i1`);
+  const r = await member(worker, () => ctx.fns.team.inspect({}));
+  expect(r.caller).toMatchObject({ kind: 'agent', id: worker, ownerUserId: 'owner', projectId: 'insp', projectTitle: 'Inspect project', persona: pname });
+  const p = r.personas.find((x: any) => x.name === pname);
+  expect(p).toMatchObject({ role: 'ресерч', promptChars: 18, memos: 0, teams: [f.id] });
+  expect(JSON.stringify(r)).not.toContain('long secret prompt');
+  const t = r.teams.find((x: any) => x.id === f.id);
+  expect(t).toMatchObject({ status: 'active', mine: true, tasks: { assigned: 1 } });
+  expect(t.roster.map((m: any) => m.agentId)).toEqual(expect.arrayContaining(f.roster));
+  expect(t.active[0]).toMatchObject({ id: `${f.id}-i1`, status: 'assigned', assignee: worker });
+  expect(r.can.rate.ok).toBe(false); expect(r.can.activate.ok).toBe(false);
+  expect(Object.keys(r.can).sort()).toEqual(['activate', 'create', 'hire', 'personaCreate', 'rate']);
+  for (const k of Object.keys(r.can)) expect(typeof r.can[k].why).toBe('string');
+  const one = await member(worker, () => ctx.fns.team.inspect({ teamId: f.id }));
+  expect(one.teams.map((x: any) => x.id)).toEqual([f.id]);
+  expect(one.next.join(' ')).toContain('team.delegate');
+  await expect(member(worker, () => ctx.fns.team.inspect({ teamId: 'no-such-team' }))).rejects.toThrow('not found or not yours');
+  const h = await human(() => ctx.fns.team.inspect({ teamId: f.id }));
+  expect(h.caller.kind).toBe('user'); expect(h.can.rate.ok).toBe(true); expect(h.teams[0].mine).toBe(true);
+});
+
+test('e2e: agent with a project builds a team from scratch — 2 project personas → create → activate (or grant error) → inspect sees roster and rights', async () => {
+  await hostSetup();
+  await query({ sql: 'ALTER TABLE agents ADD COLUMN IF NOT EXISTS created_by text' });
+  await query({ sql: 'ALTER TABLE agents ADD COLUMN IF NOT EXISTS project_id text' });
+  await query({ sql: 'CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY, title text)' });
+  await query({ sql: "INSERT INTO projects(id, title) VALUES ('e2e', 'E2E project') ON CONFLICT DO NOTHING" });
+  const me = `e2e-agent-${++serial}`;
+  await query({ sql: "INSERT INTO agents(id, created_by, project_id, created_at) VALUES (?, 'owner', 'e2e', ?)", params: [me, Date.now()] });
+  const names = [`Аня-${serial}`, `Боря-${serial}`];
+  for (const n of names) {
+    const p = await member(me, () => ctx.fns.team.personaCreate({ name: n, role: 'r', scope: 'project' } as any));
+    expect(p.created).toBe(true);
+  }
+  const teamId = `e2e-team-${serial}`;
+  const c = await member(me, () => ctx.fns.team.create({ teamId, requestKey: 'k', title: 'E2E', goal: 'g', supervisorAgentId: me, members: [{ agentId: me, role: 'supervisor', responsibilities: 'lead' }], personas: names.map(name => ({ name, role: 'r' })) }));
+  expect(c.teamVersion).toBe(1);
+  const before = await member(me, () => ctx.fns.team.inspect({ teamId }));
+  expect(before.teams[0]).toMatchObject({ id: teamId, status: 'draft', mine: true, projectId: 'e2e' });
+  expect(before.teams[0].roster.map((r: any) => r.persona).filter(Boolean)).toEqual(expect.arrayContaining(names));
+  expect(before.can.create.ok).toBe(true); expect(before.can.personaCreate.ok).toBe(true); expect(before.can.rate.ok).toBe(false);
+  for (const n of names) expect(before.personas.find((p: any) => p.name === n || p.displayName === n)).toMatchObject({ scope: 'project', projectId: 'e2e' });
+  await query({ sql: 'CREATE TABLE IF NOT EXISTS cron_grants (task_name text PRIMARY KEY, owner_id text)' });
+  await query({ sql: "DELETE FROM cron_grants WHERE task_name='team-maintenance:owner'" });
+  const noGrant = await member(me, () => ctx.fns.team.inspect({ teamId }));
+  // No owner cron grant → activation by the agent is refused with a clear message; inspect says the same.
+  expect(noGrant.can.activate.ok).toBe(false); expect(noGrant.can.activate.why).toContain('/team/');
+  await expect(member(me, () => ctx.fns.team.activate({ teamId, requestKey: 'a', expectedVersion: 1 }))).rejects.toThrow('/team/');
+  expect(before.next.join(' ')).toContain('activate');
+  expect(noGrant.can.activate.ok).toBe(false);
+  // The person has configured maintenance once → the agent activates itself; inspect shows an active team.
+  await query({ sql: "INSERT INTO cron_grants(task_name, owner_id) VALUES ('team-maintenance:owner', 'owner') ON CONFLICT DO NOTHING" });
+  expect((await member(me, () => ctx.fns.team.inspect({ teamId }))).can.activate.ok).toBe(true);
+  await member(me, () => ctx.fns.team.activate({ teamId, requestKey: 'a2', expectedVersion: 1 }));
+  const after = await member(me, () => ctx.fns.team.inspect({ teamId }));
+  expect(after.teams[0]).toMatchObject({ status: 'active', version: 2 });
+  expect(after.next.join(' ')).toContain('team.delegate');
+});
+
+test('plan limit: delegate with 3k details and a huge brief fits 12000 with marks; reopen of an auto-archived child unarchives it, of a retired one redelegates with short details', async () => {
+  await hostSetup();
+  const mgr = `lim-mgr-${++serial}`; let n = 0; const now = Date.now();
+  await query({ sql: 'ALTER TABLE agents ADD COLUMN IF NOT EXISTS title text' });
+  await query({ sql: 'INSERT INTO agents(id, created_at) VALUES (?, ?)', params: [mgr, now] });
+  ctx.fns.chat = { setIcon: async () => ({}) }; ctx.fns.events = { refreshAgentMeta: async () => ({}) };
+  ctx.fns.project = { assign: async () => ({}) };
+  const plans: any[] = [];
+  ctx.fns.agent.delegate = async (o: any) => {
+    for (const t of o.tasks) if (String(t.instructions ?? '').length > 12000) throw new Error(`plan: instructions for "${t.id}" are too long`);
+    plans.push(o.tasks);
+    const id = `${mgr}-c${++n}`;
+    await query({ sql: "INSERT INTO agents(id, parent_id, scratchpad, meta, created_at) VALUES (?, ?, ?::jsonb, ?::jsonb, ?)", params: [id, o.agent.id, JSON.stringify({ plan: { tasks: o.tasks.map((t: any) => ({ ...t, status: 'done', report: { summary: 'сделал половину' } })) } }), JSON.stringify({}), Date.now()] });
+    return { id, status: 'working' };
+  };
+  const realBrief = runtime.brief;
+  const briefCalls: any[] = [];
+  runtime.brief = async (_c: any, _s: any, o: any) => { briefCalls.push(o); return 'B'.repeat(Number(o.maxChars ?? 8000)); };
+  const d = await member(mgr, () => ctx.fns.team.delegate({ agent: { id: mgr }, title: 'Big', human: 'Do it.', details: 'D'.repeat(3000) }));
+  const instr = plans[0][0].instructions as string;
+  expect(instr.length).toBeLessThanOrEqual(12000);
+  expect(instr).toContain('D'.repeat(3000)); // details whole, brief shrank
+  expect(briefCalls[0].maxChars).toBeLessThan(8800);
+  // details far over the limit: cut with a mark, no throw
+  await member(mgr, () => ctx.fns.team.delegate({ agent: { id: mgr }, title: 'Huge', human: 'Do it.', details: 'E'.repeat(20000) }));
+  expect(plans[1][0].instructions.length).toBeLessThanOrEqual(12000);
+  expect(plans[1][0].instructions).toContain('обрезаны');
+  const pn = `Лимит-${serial}`;
+  await query({ sql: "INSERT INTO team.persona(name, owner_user_id, created_at, updated_at) VALUES (?, 'owner', ?, ?)", params: [pn, now, now] });
+
+  // reopen: auto-archived (not retired) child → unarchived, same session, notification delivered
+  runtime.brief = async (_c: any, _s: any, o: any) => 'B'.repeat(Number(o.maxChars ?? 8000));
+  ctx.state ??= {};
+  ctx.fns.session.unarchive = async ({ id }: any) => { await query({ sql: 'UPDATE agents SET archived_at=NULL WHERE id=?', params: [id] }); return { ok: true }; };
+  ctx.fns.session.mutateScratchpad = async ({ id, mutate }: any) => {
+    const row = (await query({ sql: 'SELECT scratchpad FROM agents WHERE id=?', params: [id] }))[0];
+    const sp = typeof row.scratchpad === 'string' ? JSON.parse(row.scratchpad) : row.scratchpad;
+    mutate(sp, Date.now());
+    await query({ sql: 'UPDATE agents SET scratchpad=?::jsonb WHERE id=?', params: [JSON.stringify(sp), id] });
+    return { scratchpad: sp };
+  };
+  await query({ sql: 'UPDATE agents SET archived_at=? WHERE id=?', params: [Date.now(), d.id] });
+  const before = notifications.length;
+  const r1 = await member(mgr, () => ctx.fns.team.reopen({ taskId: d.taskId, agentId: d.id, comment: 'Допиши тест' }));
+  expect(r1).toMatchObject({ action: 'agent', to: d.id });
+  expect((await query({ sql: 'SELECT archived_at FROM agents WHERE id=?', params: [d.id] }))[0].archived_at).toBeNull();
+  expect(notifications.length).toBe(before + 1); expect(notifications.at(-1).to).toBe(d.id);
+  // retired persona session (persona_session ended) with a 9k original task → redelegate fits the limit
+  const retiredId = `${mgr}-retired`;
+  const longInstr = 'Сделай большое.\n---\n' + 'X'.repeat(9000) + '\n\nTeam rules — ' + 'Y'.repeat(2500);
+  await query({ sql: "INSERT INTO agents(id, parent_id, archived_at, scratchpad, meta, created_at) VALUES (?, ?, ?, ?::jsonb, ?::jsonb, ?)", params: [retiredId, mgr, Date.now(), JSON.stringify({ plan: { tasks: [{ id: 'big-1', title: 'Большое', instructions: longInstr, status: 'done', report: { summary: 'S'.repeat(3000), notDone: ['хвост'] } }] } }), JSON.stringify({ persona: { name: pn } }), now] });
+  await query({ sql: 'INSERT INTO team.persona_session(agent_id, persona_name, team_id, started_at, ended_at) VALUES (?, ?, NULL, ?, ?)', params: [retiredId, pn, now, now] });
+  const r2 = await member(mgr, () => ctx.fns.team.reopen({ taskId: 'big-1', agentId: retiredId, comment: 'Не хватает теста. '.repeat(100) }));
+  expect(r2.action).toBe('redelegate');
+  const ins = plans.at(-1)[0].instructions as string;
+  expect(ins.length).toBeLessThanOrEqual(12000);
+  expect(ins).not.toContain('X'.repeat(2000)); expect(ins).toContain('team.sessionRead');
+  runtime.brief = realBrief;
+});
+
+
+test('persona levels: one name in two projects, system name clash, delegate sees only system + own project, system persona in teams of two projects, personaScope', async () => {
+  await hostSetup();
+  const s = ++serial, now = Date.now();
+  await query({ sql: 'CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY, title text)' });
+  await query({ sql: "INSERT INTO projects(id, title) VALUES ('pa','A'),('pb','B'),('pr','R') ON CONFLICT (id) DO NOTHING" });
+  const twin = `Двойник-${s}`, sys = `Сис-${s}`, bOnly = `Бэшная-${s}`;
+  // one display name in two projects: the second gets the key «Имя@project»
+  const a1 = await human(() => ctx.fns.team.personaCreate({ name: twin, role: 'r', scope: 'project', projectId: 'pa' }));
+  const a2 = await human(() => ctx.fns.team.personaCreate({ name: twin, role: 'r', scope: 'project', projectId: 'pb' }));
+  expect([a1.name, a1.scope, a1.projectId]).toEqual([twin, 'project', 'pa']);
+  expect([a2.name, a2.displayName, a2.projectId]).toEqual([`${twin}@pb`, twin, 'pb']);
+  expect((await human(() => ctx.fns.team.personaCreate({ name: twin, role: 'r', scope: 'project', projectId: 'pb' }))).created).toBe(false);
+  // system ↔ project clashes
+  await human(() => ctx.fns.team.personaCreate({ name: sys, role: 'r', scope: 'system' }));
+  await expect(human(() => ctx.fns.team.personaCreate({ name: sys, role: 'r', scope: 'project', projectId: 'pa' }))).rejects.toThrow('already a system persona');
+  await expect(human(() => ctx.fns.team.personaCreate({ name: twin, role: 'r', scope: 'system' }))).rejects.toThrow('already a project persona');
+  await human(() => ctx.fns.team.personaCreate({ name: bOnly, role: 'r', scope: 'project', projectId: 'pb' }));
+  // agent default: scope project, its own project
+  const inR = `lvl-r-${s}`, inB = `lvl-b-${s}`;
+  await query({ sql: "INSERT INTO agents(id, project_id, created_at) VALUES (?, 'pr', ?), (?, 'pb', ?)", params: [inR, now, inB, now] });
+  // visibility
+  await expect(member(inR, () => ctx.fns.team.personaResolve({ name: bOnly }))).rejects.toThrow(`persona ${bOnly} belongs to project pb`);
+  expect((await member(inB, () => ctx.fns.team.personaResolve({ name: twin })))!.name).toBe(`${twin}@pb`);
+  expect((await member(inR, () => ctx.fns.team.personaResolve({ name: sys })))!.scope).toBe('system');
+  expect((await human(() => ctx.fns.team.personaResolve({ name: twin })))!.projectId).toBe('pa'); // exact storage key wins
+  expect((await human(() => ctx.fns.team.personaResolve({ name: twin, projectId: 'pb' })))!.name).toBe(`${twin}@pb`);
+  const realBrief = runtime.brief; runtime.brief = async () => '(brief)';
+  ctx.fns.project = { assign: async (o: any) => ({ agentId: o.agentId, projectId: o.project, workspace: null }) };
+  ctx.fns.chat = { setIcon: async () => ({}) }; ctx.fns.events = { refreshAgentMeta: async () => ({}) };
+  let n = 0;
+  ctx.fns.agent.delegate = async (o: any) => { const id = `${o.agent.id}-c${++n}`; await query({ sql: 'INSERT INTO agents(id, parent_id, scratchpad, created_at) VALUES (?, ?, ?::jsonb, ?)', params: [id, o.agent.id, JSON.stringify({ plan: { tasks: o.tasks } }), Date.now()] }); return { id, status: 'working' }; };
+  try {
+    await expect(member(inR, () => ctx.fns.team.delegate({ agent: { id: inR }, title: 'X', human: 'Do it.', persona: bOnly }))).rejects.toThrow(`persona ${bOnly} belongs to project pb`);
+    const d = await member(inB, () => ctx.fns.team.delegate({ agent: { id: inB }, title: 'X', human: 'Do it.', persona: twin }));
+    expect(d.persona).toBe(`${twin}@pb`);
+    expect((await query({ sql: 'SELECT persona_name FROM team.persona_session WHERE agent_id=?', params: [d.id] }))[0].persona_name).toBe(`${twin}@pb`);
+  } finally { runtime.brief = realBrief; }
+  // a system persona joins teams of two projects; its memory is one
+  const t1 = await fixture(), t2 = await fixture();
+  await query({ sql: "INSERT INTO agents(id, project_id, created_at) VALUES (?, 'pa', ?), (?, 'pb', ?) ON CONFLICT (id) DO UPDATE SET project_id = EXCLUDED.project_id", params: [t1.roster[0], now, t2.roster[0], now] });
+  for (const t of [t1, t2]) { const v = (await query({ sql: 'SELECT version FROM team.team WHERE id=?', params: [t.id] }))[0].version; await human(() => t.command({ action: 'personaJoin', name: sys }, v)); }
+  expect((await query({ sql: 'SELECT count(*)::int AS c FROM team.team_persona WHERE persona_name=? AND active', params: [sys] }))[0].c).toBe(2);
+  // personaScope: system → project and back; clash refused; revision written
+  const sc = await human(() => ctx.fns.team.personaScope({ name: sys, scope: 'project', projectId: 'pa' }));
+  expect([sc.scope, sc.projectId, sc.changed]).toEqual(['project', 'pa', true]);
+  expect((await human(() => ctx.fns.team.personaScope({ name: sys, scope: 'project', projectId: 'pa' }))).changed).toBe(false);
+  expect((await human(() => ctx.fns.team.personaScope({ name: sys, scope: 'system' }))).scope).toBe('system');
+  await expect(human(() => ctx.fns.team.personaScope({ name: twin, scope: 'system' }))).rejects.toThrow('cannot become system');
+  await expect(human(() => ctx.fns.team.personaScope({ name: sys, scope: 'project', projectId: 'pa' }), 'stranger')).rejects.toThrow('only the persona owner');
+  expect((await query({ sql: "SELECT count(*)::int AS c FROM team.persona_rev WHERE persona_name=? AND field='scope'", params: [sys] }))[0].c).toBe(2);
+  const g = await human(() => ctx.fns.team.personaGet({ name: `${twin}@pb`, revisions: 0 }));
+  expect([g!.displayName, g!.scope, g!.projectId]).toEqual([twin, 'project', 'pb']);
 });

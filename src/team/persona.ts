@@ -59,14 +59,27 @@ export default async function (
     }
     tasks.sort((a, b) => b.at - a.at);
     const last = tasks.slice(0, 20);
-    let avg = 0, cnt = 0;
-    for (const id of ids) { const r = (await ctx.fns.team.ratings({ agentId: id, recent: 0 })).agents[0]; if (r) { avg += r.avg * r.count; cnt += r.count; } }
+    const pr = (await ctx.fns.team.ratings({ persona: p.name, recent: 0 })).personas[0];
+    const avg = pr ? pr.avg * pr.count : 0, cnt = pr?.count ?? 0;
     const avgTxt = cnt ? `★ ${(Math.round(avg / cnt * 10) / 10).toFixed(1)} <span class="mu">· ${cnt} ${cnt === 1 ? 'оценка' : cnt < 5 ? 'оценки' : 'оценок'}</span>` : '<span class="mu">оценок пока нет</span>';
 
+    // ---- level (system | project): read straight from team.persona until personaGet carries it
+    const hasScope = ((await ctx.fns.procs.db.select({ sql: `SELECT 1 FROM information_schema.columns WHERE table_schema='team' AND table_name='persona' AND column_name='scope'`, params: [] })) as Row[]).length > 0;
+    const lvRow = hasScope ? ((await ctx.fns.procs.db.select({ sql: `SELECT scope, project_id, display_name FROM team.persona WHERE name = ? LIMIT 1`, params: [p.name] })) as Row[])[0] : undefined;
+    const projects = hasScope ? await ctx.fns.procs.db.select({ sql: `SELECT id, title FROM projects ORDER BY title`, params: [] }) as Row[] : [];
+    const pt = new Map(projects.map(x => [String(x.id), String(x.title)]));
+    const scope = String(lvRow?.scope ?? 'system'), projId = lvRow?.project_id ? String(lvRow.project_id) : '';
+    const lvBadge = scope === 'project' ? `<span class="sc pj">${esc(pt.get(projId) ?? projId)}</span> <span class="mu">проектная</span>` : '<span class="sc">system</span> <span class="mu">видна во всех проектах</span>';
+    const canScope = hasScope && isOwner && typeof (ctx.fns.team as Record<string, unknown>).personaScope === 'function';
+    const lvForm = canScope ? w.form({ form: 'team-persona-scope', post: '/team/persona', target: '#' + root, swap: 'outerHTML', layout: 'row', vals: { name: p.name, action: 'scope' },
+        body: csrf + w.select({ name: 'scope', options: [{ value: 'system', label: 'Системная' }, { value: 'project', label: 'Проектная' }], value: scope })
+            + w.select({ name: 'projectId', options: projects.map(x => ({ value: String(x.id), label: String(x.title) })), value: projId || 'b' })
+            + w.button({ label: 'Сменить уровень', size: 'sm', submit: true }) }) : '';
     // ---- header card
     const chips = (xs: string[]) => xs.length ? xs.map(x => `<span class="ch">${esc(x)}</span>`).join('') : '<span class="mu">—</span>';
-    const header = `<header class="hd"><span class="fc">${face('lg')}</span><div class="tt"><h1>${esc(p.name)}</h1><p class="dl">${esc(p.role || 'без роли')} · ${avgTxt}</p></div></header>`;
+    const header = `<header class="hd"><span class="fc">${face('lg')}</span><div class="tt"><h1>${esc(lvRow?.display_name ?? p.name)}</h1><p class="dl">${esc(p.role || 'без роли')} · ${avgTxt}</p></div></header>`;
     const dl = `<dl class="kv">
+${hasScope ? `<dt>Уровень</dt><dd><div class="lvl">${lvBadge}</div>${lvForm}</dd>` : ''}
 <dt>Ответственность</dt><dd>${p.responsibilities ? esc(p.responsibilities) : '<span class="mu">—</span>'}</dd>
 <dt>Плагины</dt><dd>${chips(p.plugins)}</dd>
 <dt>Модель</dt><dd>${p.model ? `<code>${esc(p.model)}</code>` : '<span class="mu">по умолчанию</span>'}</dd>
@@ -117,6 +130,9 @@ ${p.sessions.filter(s => s.agentId !== p.currentAgentId).length ? `<dt>Рань�
 // same look as the board and task card: --w-* tokens, grey secondary text, thin rules
 const STYLE = `<style>
 .pview{box-sizing:border-box;padding:var(--w-s6);background:var(--w-surface-document);color:var(--w-ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:var(--w-text-ui);line-height:var(--w-line-ui)}
+.pview .sc{display:inline-block;padding:0 6px;border:var(--w-rule);border-radius:999px;font-size:11px;line-height:16px;color:var(--w-ink-faint)}
+.pview .sc.pj{color:var(--w-live);border-color:currentColor}
+.pview .lvl{margin-bottom:var(--w-s2)}
 .pview .hd{display:flex;align-items:center;gap:var(--w-s4);padding-bottom:var(--w-s4);border-bottom:var(--w-rule)}
 .pview h1{margin:0;font-size:var(--w-text-read);font-weight:600;line-height:var(--w-line-ui)}
 .pview .dl{margin:2px 0 0;font-size:var(--w-text-small);line-height:var(--w-line-small);color:var(--w-ink-muted)}

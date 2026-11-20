@@ -20,6 +20,15 @@ export default async function(ctx:Context,session:Session|null,opts:{req:Request
  let notice='';
  try {
   const revertOf=get('revertOf').trim();
+  if(get('action')==='scope') {
+   const scope=get('scope'); if(scope!=='system'&&scope!=='project') throw new Error('уровень: system или project');
+   const fn=(ctx.fns.team as unknown as Record<string,(o:Record<string,unknown>)=>Promise<Record<string,unknown>>>).personaScope;
+   if(typeof fn!=='function') throw new Error('смена уровня пока недоступна');
+   await fn({name,scope,...(scope==='project'?{projectId:get('projectId')}:{})});
+   notice='Уровень: '+(scope==='system'?'системная':'проектная')+'.';
+   ctx.fns.procs.events.refresh({topic:'team',reason:'persona scope '+name});
+   return html(await ctx.fns.team.persona({name,notice}));
+  }
   if(revertOf) {
    const rev=p.revisions.find(r=>r.id===revertOf); if(!rev) throw new Error('ревизия не найдена');
    if(rev.field==='memo') {

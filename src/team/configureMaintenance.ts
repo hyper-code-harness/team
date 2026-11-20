@@ -8,5 +8,5 @@ export default async function (
     session: Session | null,
     opts: {},
 ): Promise<{name:string;ownerId:string}> {
-    const actor=await ctx.fns.team.resolveActor({});if(actor.kind!=='user')throw new Error('Owner HTTP context required');const name='team-maintenance:'+actor.id;await ctx.fns.cron.add({name,fn:'team.maintenance',every:'20s',args:{}});const grant=await ctx.fns.cron.grant({name,fn:'team.maintenance',scopes:['notification.enqueue']});return {name,ownerId:grant.ownerId};
+    const actor=await ctx.fns.team.resolveActor({});if(actor.kind!=='user')throw new Error('Owner HTTP context required — Агент: cron grant для обслуживания команды настраивает только человек на /team/ (кнопка активации); команду, персону, hire/fire агент сессии человека делает сам');const name='team-maintenance:'+actor.id;await ctx.fns.cron.add({name,fn:'team.maintenance',every:'20s',args:{}});const grant=await ctx.fns.cron.grant({name,fn:'team.maintenance',scopes:['notification.enqueue']});return {name,ownerId:grant.ownerId};
 }
